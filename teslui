@@ -32,7 +32,7 @@ OWNER_CLIENT_ID="ownerapi"
 MODE="ro"
 FANCY=1            # 0 = minimal, 1 = icons+colors style
 INVERTED=0         # 0 = normal, 1 = inverted
-BW=0               # 0 = colors, 1 = black & white (monochrome)
+BW=0               # 0 = colors, 1 = black & white
 UNIT="metric"
 SHOW_HELP=0
 ACCESS_TOKEN=""
@@ -107,11 +107,11 @@ setup_colors
 # Label col: longest is "Defrost" (7), pad to 8.
 # Value col: longest is "999 kW (999 V, 999 A)" (~19), pad to 20.
 # Two columns + 2-space margins each side + 2 gap = (2+8+1+20)*2 + 2 = 64.
-LBL_W=8
+LBL_W=9
 VAL_W=20
-COL_W=$(( 2 + LBL_W + 1 + VAL_W ))   # one column: "  LABEL VALUE"
-CONTENT_W=$(( COL_W * 2 + 2 ))       # two columns + 2-char gap
-MAX_W=$(( CONTENT_W + 2 ))           # small slack cap
+COL_W=$(( 2 + LBL_W + VAL_W ))
+CONTENT_W=$(( COL_W * 2 + 2 ))
+MAX_W=$(( CONTENT_W ))
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 die() {
@@ -145,7 +145,8 @@ _kcell() { printf "${C_GRY}${C_REV} %-$((LBL_W-1))s${C_R}" "$1"; }
 
 # ── Frame infrastructure ───────────────────────────────────────────────────────
 # All rendering writes into global OUT string, then flush_frame prints atomically.
-OUT=""
+OUT_LINES=()
+OUT_MAXVIS=0
 FRAME_W=80     # actual frame width for this render, recalculated each draw
 MARGIN=0       # left margin to center in terminal
 
@@ -155,17 +156,22 @@ CAT_LABELS=0
 frame_start() {
     local term_w; term_w=$(tput cols)
     local term_h; term_h=$(tput lines)
+
     FRAME_W=$(( CONTENT_W < MAX_W ? CONTENT_W : MAX_W ))
     (( FRAME_W > term_w )) && FRAME_W=$term_w
-    MARGIN=$(( (term_w - FRAME_W) / 2 ))
-    (( MARGIN < 0 )) && MARGIN=0
-    OUT=""
+
+    # reset buffer; margin computed later once we know actual max line length
+    OUT_LINES=()
+    OUT_MAXVIS=0
 }
 
 # Append a line (with left margin) to OUT
 fline() {
     local s="${1:-}"
-    OUT+="$(printf "%${MARGIN}s" "")${C_BG}${s}${C_R}"$'\n'
+    OUT_LINES+=("$s")
+
+    local vis; vis=$(vlen "$s")
+    (( vis > OUT_MAXVIS )) && OUT_MAXVIS=$vis
 }
 
 # Append a blank line
@@ -234,9 +240,22 @@ fsection() {
 
 # Flush OUT to terminal: go to home, erase to end, write. No flicker.
 flush_frame() {
+    local term_w; term_w=$(tput cols)
+
+    # center by actual rendered width (max line visible length)
+    local w=$OUT_MAXVIS
+    (( w > term_w )) && w=$term_w
+
+    local margin=$(( (term_w - w) / 2 ))
+    (( margin < 0 )) && margin=0
+
     tput home
     tput ed
-    printf '%s' "$OUT"
+
+    local line
+    for line in "${OUT_LINES[@]}"; do
+        printf "%${margin}s%s%s%s\n" "" "${C_BG}" "$line" "${C_R}"
+    done
 }
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
@@ -410,11 +429,9 @@ render() {
     local bat range chg_state chg_limit chg_mins time chg_kw chg_volts chg_current chg_added bat_heat draw
     bat=$(         printf '%s' "$d" | jq -r '.response.charge_state.battery_level // 0 | floor')
     range=$(       printf '%s' "$d" | jq -r '.response.charge_state.battery_range // 0 | round')
-    chg_state=$(   printf '%s' "$d" | jq -r '.response.charge_state.charging_state // "Disconnected"')
+    chg_state=$(printf '%s' "$d" | jq -r '.response.charge_state.charging_state // "Disconnected" | ascii_downcase')
     chg_limit=$(   printf '%s' "$d" | jq -r '.response.charge_state.charge_limit_soc // 0')
     chg_mins=$(printf '%s' "$d" | jq -r '.response.charge_state.minutes_to_full_charge // 0')
-    chg_mins=72
-    chg_state=Charging
     time=$(printf "%02d:%02d" $((chg_mins/60)) $((chg_mins%60)))
     chg_kw=$(      printf '%s' "$d" | jq -r '.response.charge_state.charger_power // 0')
     chg_volts=$(   printf '%s' "$d" | jq -r '.response.charge_state.charger_voltage // 0')
@@ -468,8 +485,8 @@ render() {
     local bat_bar; bat_bar=$(make_bat_bar "$bat")
 
     local cs_c=$C_GRY
-    [[ "$chg_state" == "Charging" ]] && cs_c=$C_YLW
-    [[ "$chg_state" == "Complete" ]] && cs_c=$C_GRN
+    [[ "$chg_state" == "charging" ]] && cs_c=$C_YLW
+    [[ "$chg_state" == "complete" ]] && cs_c=$C_GRN
 
     local clm_c=$C_GRY clm_l="off"
     [[ "$climate_on" == "true" ]] && { clm_c=$C_GRN; clm_l="on"; }
@@ -517,13 +534,13 @@ render() {
     local ts; ts=$(date '+%b %d, %H:%M')
     frow "${C_B}${C_R}${name} ${model}${C_R}, ${odo} ${dist_u}" "" "${sc}${state}${C_R}" "${C_GRY}[${mode_c}${MODE}${C_R}${C_GRY}]"
     [[ "$swua" == "available" ]] && upd="${C_BLU}⁺${C_R}"
-    frow "${C_GRY}${vin}${C_R}" "${C_GRY}[v${sw}${C_R}${upd}${C_GRY}]${C_R}" "${C_GRY}${ts}${C_R}" ""
+    frow "${C_GRY}[${vin}]${C_R}" "${C_GRY}v${sw}${C_R}${upd}${C_GRY}${C_R}" "${C_GRY}${ts}${C_R}" ""
 
     # Battery + Climate (enable subsection label styling)
     fsection "${px_bat}ENERGY                          ${px_clm}THERMAL"
     CAT_LABELS=1
     added=""
-    if [[ "$chg_state" != "Disconnected" ]]; then
+    if [[ "$chg_state" != "disconnected" ]]; then
 	added="${C_GRN}+${chg_added} kW${C_R}"
     fi
     frow "Battery"   "${bat_bar}"                          "Outside" "${outside}${temp_u}"
@@ -531,7 +548,7 @@ render() {
     frow "Draw"      "${dra_c}${draw} kW${C_R}"            "Target"  "${set_temp}${temp_u}"
     frow "Charge"    "${cs_c}${chg_state}${C_R} ${added}"  "Control"  "${clm_c}${clm_l}${C_R}"
     frow "Limit"     "${chg_limit}%"                       "Defrost" "${def_c}${def_l}${C_R}"
-    if [[ "$chg_state" != "Disconnected" ]]; then
+    if [[ "$chg_state" != "disconnected" ]]; then
 	frow "Power"  "${C_YLW}${chg_kw} kW (${chg_volts} V, ${chg_current} A)${C_R}" "Battery" ""
 	frow "End in" "${time}" " heater" "${bat_c}${bat_l}${C_R}"
     fi
@@ -557,26 +574,18 @@ render() {
 }
 
 # ── Demo data ─────────────────────────────────────────────────────────────────
-DEMO_DATA='{"response":{"display_name":"My Tesla","vin":"5YJ3E1EA1NF000001",
-"state":"online","vehicle_config":{"car_type":"model3"},
-"vehicle_state":{"odometer":18432,"car_version":"2024.44.30",
-"locked":true,"sentry_mode":true,"valet_mode":false,"df":0,"pf":0,"dr":0,"pr":0},
-"charge_state":{"battery_level":73,"battery_range":218,"charging_state":"Disconnected",
-"charge_limit_soc":80,"time_to_full_charge":0,"charger_power":0,
-"charger_voltage":0,"charge_amps":0},
-"climate_state":{"inside_temp":22.5,"outside_temp":8.0,
-"driver_temp_setting":21.0,"is_climate_on":false},
-"drive_state":{"speed":0,"shift_state":null,"heading":270,
-"latitude":37.4924,"longitude":-122.2577,"power":0}}}'
+DEMO_DATA='{"response":{"vin":"DEMOE1EA1NF000001","state":"charging","vehicle_config":{"car_type":"modely"},"vehicle_state":{"vehicle_name":"DEMO","odometer":18432,"car_version":"2026.2.3","locked":true,"sentry_mode":true,"valet_mode":false,"df":0,"pf":0,"dr":0,"pr":0,"software_update":{"version":"2026.2.6","status":"available"},"tpms_pressure_fl":3.00,"tpms_pressure_fr":3.05,"tpms_pressure_rl":2.95,"tpms_pressure_rr":3.00},"charge_state":{"battery_level":73,"battery_range":218,"charging_state":"Charging","charge_limit_soc":80,"minutes_to_full_charge":23,"charger_power":7,"charger_voltage":230,"charge_actual_current":32,"charge_energy_added":4.2,"battery_heater_on":true},"climate_state":{"inside_temp":22.5,"outside_temp":8.0,"driver_temp_setting":21.0,"is_climate_on":true,"defrost_mode":0},"drive_state":{"power": 2,"shift_state": null,"speed": null,"timestamp": 1771692668445}}}'
 
 # ── Arg parsing ───────────────────────────────────────────────────────────────
 usage() {
-    printf 'teslui — A Tesla vehicle dashboard TUI\n\n'
-    printf '  ./teslui [--mode MODE] [--invert] [--fancy]\n\n'
-    printf '  --mode ro|mtm|vc         Command mode: read-only (default), MyTeslaMate (nonfree), vehicle-command\n'
-    printf '  --unit metric|imperial   Set units (metric: km, °C, bar; imperial: mi, °F, psi)\n'
-    printf '  --invert                 Start in inverted color mode\n'
-    printf '  --fancy                  Start with icons style\n\n'
+    printf 'teslui — Tesla status TUI\n\n'
+    printf '  ./teslui [--mode MODE] [--unit UNIT] [--invert] [--fancy]\n\n'
+    printf 'Options:\n'
+    printf '  -m, --mode ro|mtm|vc         Command mode: read-only (default), MyTeslaMate (nonfree), vehicle-command\n'
+    printf '  -u, --unit metric|us         Set units (metric: km, °C, bar; imperial: mi, °F, psi)\n'
+    printf '  -i, --invert                 Start in inverted color mode\n'
+    printf '  -t, --text                   Disable fancy style\n'
+    printf '  -b, --bw                     Disable colors\n\n'
     printf '  TESLA_REFRESH_TOKEN      Required env var\n'
     printf '  TESLA_VIN                Optional: pin to a vehicle\n'
     exit 0
@@ -603,7 +612,8 @@ parse_args() {
 		    *)  UNIT=metric ; printf 'Unknown unit: %s. Defaulting to metric.\n' "${1:-}" >&2 ;;
 		esac ;;
 	    --invert|-i) INVERTED=1; setup_colors ;;
-            --fancy|-f)  FANCY=1 ;;
+            --text|-t)   FANCY=0 ;;
+	    --bw|-b)     BW=1; setup_colors ;;
             --help|-h)   usage ;;
             *) printf 'Unknown arg: %s\n' "$1" >&2; usage ;;
         esac
@@ -702,23 +712,19 @@ main() {
     trap 'tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; exit 0' INT TERM EXIT
 
     # Demo mode
+    # Demo mode (no token → use DEMO_DATA forever)
     if [[ -z "$REFRESH_TOKEN" ]]; then
-        local key
-        while true; do
+	local key
+	while true; do
             if [[ $SHOW_HELP -eq 1 ]]; then
-                render_help
+		render_help
             else
-                render "$DEMO_DATA"
-                # overwrite hint line
-                frame_start
-                OUT=""
-                fblank; fcenter "${C_YLW}demo mode — set TESLA_REFRESH_TOKEN to connect${C_R}"
-                # just print at bottom without full redraw
-                printf '%s' "$OUT"
+		render "$DEMO_DATA" "$UNIT"
             fi
+
             key=$(read_key || true)
             handle_key "$key" "" || true
-        done
+	done
     fi
 
     # Validate mode deps
