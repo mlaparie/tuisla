@@ -1,0 +1,772 @@
+#!/usr/bin/env bash
+# =============================================================================
+#  teslui — A Tesla vehicle dashboard TUI
+#
+#  USAGE:  ./teslui [--mode MODE] [--unit UNIT] [--invert] [--fancy] [--help]
+#
+#  MODES:  ro (read-only, default) | mtm (myteslamate) | vc (vehicle-command)
+#
+#  UNITS:  metric | us
+#
+#  ENV:
+#    TESLA_REFRESH_TOKEN    Required. Your TeslaMate/SSO refresh token.
+#    TESLA_VIN              Optional. Pin to a specific vehicle.
+#    MYTESLAMATE_TOKEN      Required for --mode myteslamate.
+#    VEHICLE_COMMAND_URL    Default: https://localhost:4443
+#    VEHICLE_COMMAND_CERT   Default: cert.pem
+#
+#  IN-TUI KEYS:
+#    ?   toggle help screen
+#    r   refresh now
+#    q   quit
+#
+#  DEPENDENCIES: curl, jq, tput
+# =============================================================================
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+REFRESH_INTERVAL=5
+OWNER_API="https://owner-api.teslamotors.com/api/1"
+AUTH_URL="https://auth.tesla.com/oauth2/v3/token"
+OWNER_CLIENT_ID="ownerapi"
+
+MODE="ro"
+FANCY=1            # 0 = minimal, 1 = icons+colors style
+INVERTED=0         # 0 = normal, 1 = inverted
+BW=0               # 0 = colors, 1 = black & white (monochrome)
+UNIT="metric"
+SHOW_HELP=0
+ACCESS_TOKEN=""
+REFRESH_TOKEN="${TESLA_REFRESH_TOKEN:-}"
+TARGET_VIN="${TESLA_VIN:-}"
+MYTESLAMATE_TOKEN="${MYTESLAMATE_TOKEN:-}"
+VEHICLE_COMMAND_URL="${VEHICLE_COMMAND_URL:-https://localhost:4443}"
+VEHICLE_COMMAND_CERT="${VEHICLE_COMMAND_CERT:-cert.pem}"
+
+# ── Color setup ───────────────────────────────────────────────────────────────
+# Colors are set via tput at startup and on every toggle, so they respect $TERM.
+setup_colors() {
+    local inv=$INVERTED
+    if [[ $inv -eq 0 ]]; then
+        # Normal mode
+        printf '\e[?5l'
+        C_R=$(tput sgr0)
+        C_B=$(tput bold)
+        C_DIM=$(tput dim 2>/dev/null || printf '')
+        C_REV=$(tput rev)
+        if [[ "${BW:-0}" -eq 1 ]]; then
+            # Black & white: disable colors, keep emphasis via bold/dim/rev.
+            C_RED=""
+            C_GRN=""
+            C_YLW=""
+            C_BLU=""
+            C_MAG=""
+            C_CYN=""
+            C_GRY=$(tput setaf 8)   # keep grey for labels/keycaps
+        else
+            C_RED=$(tput setaf 1)
+            C_GRN=$(tput setaf 2)
+            C_YLW=$(tput setaf 3)
+            C_BLU=$(tput setaf 4)
+            C_MAG=$(tput setaf 5)
+            C_CYN=$(tput setaf 6)
+            C_GRY=$(tput setaf 8)
+        fi
+        C_BG=""
+        C_FG=""
+    else
+        # Inverted mode
+        printf '\e[?5h'
+        C_R=$(tput sgr0)
+        C_B=$(tput bold)
+        C_DIM=$(tput dim 2>/dev/null || printf '')
+        C_REV=$(tput rev)
+        if [[ "${BW:-0}" -eq 1 ]]; then
+            C_RED=""
+            C_GRN=""
+            C_YLW=""
+            C_BLU=""
+            C_MAG=""
+            C_CYN=""
+            C_GRY=$(tput setaf 8)
+        else
+            C_RED=$(tput setaf 1)
+            C_GRN=$(tput setaf 2)
+            C_YLW=$(tput setaf 3)
+            C_BLU=$(tput setaf 4)
+            C_MAG=$(tput setaf 5)
+            C_CYN=$(tput setaf 6)
+            C_GRY=$(tput setaf 8)
+        fi
+        C_BG=""
+        C_FG=""
+    fi
+}
+setup_colors
+
+# ── Column widths (based on current render() content) ─────────────────────────
+# Label col: longest is "Defrost" (7), pad to 8.
+# Value col: longest is "999 kW (999 V, 999 A)" (~19), pad to 20.
+# Two columns + 2-space margins each side + 2 gap = (2+8+1+20)*2 + 2 = 64.
+LBL_W=8
+VAL_W=20
+COL_W=$(( 2 + LBL_W + 1 + VAL_W ))   # one column: "  LABEL VALUE"
+CONTENT_W=$(( COL_W * 2 + 2 ))       # two columns + 2-char gap
+MAX_W=$(( CONTENT_W + 2 ))           # small slack cap
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+die() {
+    tput rmcup 2>/dev/null; tput cnorm 2>/dev/null
+    printf "%s\n" "$*" >&2; exit 1
+}
+
+check_deps() {
+    for cmd in curl jq tput; do
+        command -v "$cmd" &>/dev/null || die "Missing dependency: $cmd"
+    done
+}
+
+strip_ansi() { printf '%s' "$1" | sed 's/\x1b\[[0-9;]*m\|\x1b(B//g'; }
+
+# visible length of a string (strips ANSI)
+vlen() { local s; s=$(strip_ansi "$1"); printf '%d' "${#s}"; }
+
+# Print $1 left-padded to center in $2 cols
+center_print() {
+    local s="$1" w="$2"
+    local vis; vis=$(vlen "$s")
+    local pad=$(( (w - vis) / 2 ))
+    (( pad > 0 )) && printf "%${pad}s" ""
+    printf '%s\n' "$s"
+}
+
+# Like help's _k(), but padded to LBL_W for the label column.
+# NOTE: keeps the "grey keycap background" by forcing C_GRY before C_REV.
+_kcell() { printf "${C_GRY}${C_REV} %-$((LBL_W-1))s${C_R}" "$1"; }
+
+# ── Frame infrastructure ───────────────────────────────────────────────────────
+# All rendering writes into global OUT string, then flush_frame prints atomically.
+OUT=""
+FRAME_W=80     # actual frame width for this render, recalculated each draw
+MARGIN=0       # left margin to center in terminal
+
+# Only when 1 (and FANCY=1) do we style subsection row labels with help-like C_REV.
+CAT_LABELS=0
+
+frame_start() {
+    local term_w; term_w=$(tput cols)
+    local term_h; term_h=$(tput lines)
+    FRAME_W=$(( CONTENT_W < MAX_W ? CONTENT_W : MAX_W ))
+    (( FRAME_W > term_w )) && FRAME_W=$term_w
+    MARGIN=$(( (term_w - FRAME_W) / 2 ))
+    (( MARGIN < 0 )) && MARGIN=0
+    OUT=""
+}
+
+# Append a line (with left margin) to OUT
+fline() {
+    local s="${1:-}"
+    OUT+="$(printf "%${MARGIN}s" "")${C_BG}${s}${C_R}"$'\n'
+}
+
+# Append a blank line
+fblank() { fline ""; }
+
+# Append a centered line within FRAME_W
+fcenter() {
+    local s="$1"
+    local vis; vis=$(vlen "$s")
+    local pad=$(( (FRAME_W - vis) / 2 ))
+    (( pad < 0 )) && pad=0
+    fline "$(printf "%${pad}s" "")${s}"
+}
+
+# Append a line (with right margin) to OUT
+fright() {
+    local s="${1:-}"
+    local vis; vis=$(vlen "$s")
+    local pad=$(( FRAME_W - vis ))
+    (( pad < 0 )) && pad=0
+    fline "$(printf "%${pad}s" "")${s}"
+}
+
+# Two-column row: frow LABEL_L VAL_L LABEL_R VAL_R
+# Labels are C_GRY, values are plain (caller adds color)
+frow() {
+    local ll="${1:-}" vl="${2:-}" lr="${3:-}" vr="${4:-}"
+    local half=$(( FRAME_W / 2 ))
+
+    local ll_cell lr_cell
+    if [[ "${FANCY:-0}" == 1 && "${CAT_LABELS:-0}" == 1 ]]; then
+        ll_cell="$(_kcell "$ll")"
+        lr_cell="$(_kcell "$lr")"
+    else
+        ll_cell="${C_GRY}$(printf "%-${LBL_W}s" "$ll")${C_R}"
+        lr_cell="${C_GRY}$(printf "%-${LBL_W}s" "$lr")${C_R}"
+    fi
+
+    local left="${ll_cell} ${vl}"
+    local right="${lr_cell} ${vr}"
+
+    local lvis; lvis=$(vlen "$left")
+    local pad=$(( half - lvis - 2 ))
+    (( pad < 0 )) && pad=0
+
+    fline "  ${left}$(printf "%${pad}s" "")  ${right}"
+}
+
+# Single full-width row
+frow1() {
+    local label="${1:-}" val="${2:-}"
+    local lab
+    if [[ "${FANCY:-0}" == 1 && "${CAT_LABELS:-0}" == 1 ]]; then
+        lab="$(_kcell "$label")"
+    else
+        lab="${C_GRY}$(printf "%-${LBL_W}s" "$label")${C_R}"
+    fi
+    fline "  ${lab} ${val}"
+}
+
+# Section header (minimal: just a blank line + bold label)
+fsection() {
+    fblank
+    fline "  ${C_B}${C_MAG}${1}${C_R}"
+}
+
+# Flush OUT to terminal: go to home, erase to end, write. No flicker.
+flush_frame() {
+    tput home
+    tput ed
+    printf '%s' "$OUT"
+}
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+refresh_access_token() {
+    local resp
+    resp=$(curl -sf -X POST "$AUTH_URL" \
+        -H "Content-Type: application/x-www-form-urlencoded" \
+        --data-urlencode "grant_type=refresh_token" \
+        --data-urlencode "client_id=${OWNER_CLIENT_ID}" \
+        --data-urlencode "refresh_token=${REFRESH_TOKEN}" \
+        --data-urlencode "scope=openid email offline_access") \
+        || die "Token refresh failed — check TESLA_REFRESH_TOKEN"
+    ACCESS_TOKEN=$(printf '%s' "$resp" | jq -r '.access_token // empty')
+    local new_rt; new_rt=$(printf '%s' "$resp" | jq -r '.refresh_token // empty')
+    [[ -n "$new_rt" && "$new_rt" != "$REFRESH_TOKEN" ]] && REFRESH_TOKEN="$new_rt"
+    [[ -z "$ACCESS_TOKEN" ]] && die "Could not extract access_token"
+}
+
+# ── Data API ──────────────────────────────────────────────────────────────────
+api_get() {
+    curl -s \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        -H "Content-Type: application/json" \
+        -H "User-Agent: teslui/1.0" \
+        "${OWNER_API}${1}"
+}
+
+get_vehicle_id() {
+    local resp; resp=$(api_get "/products")
+    local err; err=$(printf '%s' "$resp" | jq -r '.error // empty' 2>/dev/null)
+    [[ -n "$err" ]] && die "API error: $err"
+    if [[ -n "$TARGET_VIN" ]]; then
+        printf '%s' "$resp" | jq -r --arg v "$TARGET_VIN" \
+            '.response[] | select(.vin==$v) | .id_s // (.id | tostring)'
+    else
+        printf '%s' "$resp" | jq -r \
+            '[.response[] | select(.vin != null)] | .[0] | .id_s // (.id | tostring)'
+    fi
+}
+
+wake_up() {
+    local vid="$1" i state
+    frame_start
+    fblank; fcenter "${C_YLW}waking vehicle…${C_R}"
+    flush_frame
+    curl -s -X POST \
+        -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+        -H "User-Agent: teslui/1.0" \
+        "${OWNER_API}/vehicles/${vid}/wake_up" >/dev/null 2>&1
+    for i in $(seq 1 12); do
+        sleep 3
+        state=$(api_get "/vehicles/${vid}" | jq -r '.response.state // empty' 2>/dev/null)
+        [[ "$state" == "online" ]] && return 0
+        frame_start
+        fblank; fcenter "${C_YLW}waking… (${i}/12)${C_R}"
+        flush_frame
+    done
+}
+
+get_data() {
+    local resp; resp=$(api_get "/vehicles/${1}/vehicle_data")
+    if printf '%s' "$resp" | jq -e '.response.vin' >/dev/null 2>&1; then
+        printf '%s' "$resp"
+    fi
+}
+
+# ── Commands ──────────────────────────────────────────────────────────────────
+CMD_MSG=""
+
+run_cmd() {
+    local vid="$1" ep="$2" label="$3"
+    local resp result reason
+
+    case "$MODE" in
+        mtm)
+            resp=$(curl -s -X POST \
+                -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -H "User-Agent: teslui/1.0" \
+                "https://api.myteslamate.com/api/1/vehicles/${vid}/command/${ep}?token=${MYTESLAMATE_TOKEN}") ;;
+        vc)
+            resp=$(curl -s -X POST \
+                --cacert "$VEHICLE_COMMAND_CERT" \
+                -H "Authorization: Bearer ${ACCESS_TOKEN}" \
+                -H "Content-Type: application/json" \
+                -H "User-Agent: teslui/1.0" \
+                "${VEHICLE_COMMAND_URL}/api/1/vehicles/${TARGET_VIN}/command/${ep}") ;;
+        *) return ;;
+    esac
+
+    result=$(printf '%s' "$resp" | jq -r '.response.result // false')
+    reason=$(printf '%s' "$resp" | jq -r '.response.reason // .error // ""')
+
+    if [[ "$result" == "true" ]]; then
+        CMD_MSG="${C_GRN}✓ ${label}${C_R}"
+    else
+        CMD_MSG="${C_RED}✗ ${reason:-failed}${C_R}"
+    fi
+}
+
+# ── Battery bar ────────────────────────────────────────────────────────────────
+make_bat_bar() {
+    local pct="$1" width=12
+    local filled=$(( pct * width / 100 ))
+    local empty=$(( width - filled ))
+    local c
+    (( pct >= 70 )) && c=$C_GRN || { (( pct >= 30 )) && c=$C_YLW || c=$C_RED; }
+    local bar="${c}"
+    (( filled > 0 )) && bar+=$(printf '%0.s█' $(seq 1 "$filled"))
+    bar+="${C_GRY}"; (( empty > 0 )) && bar+=$(printf '%0.s░' $(seq 1 "$empty"))
+    bar+="${c}${C_R} ${c}${pct}%${C_R}"
+    printf '%s' "$bar"
+}
+
+# ── Help screen ───────────────────────────────────────────────────────────────
+render_help() {
+    local _cat_save=${CAT_LABELS:-0}
+    CAT_LABELS=0   # help must not react to 't' (minimal/fancy)
+
+    frame_start
+    fblank
+
+    # key helper: reverse-video key label + description
+    _k() { printf "${C_REV} %-1s ${C_R} %s" "$1" "$2"; }
+
+    fsection "TESLUI"
+    frow "$(_k c  "command mode")"    "" "$(_k u  "unit")"
+    frow "$(_k r  "refresh")"     "" "$(_k s  "style")"
+    frow "$(_k -  "refresh -5s")" "" "$(_k i  "invert")"
+    frow "$(_k +  "refresh +5s")" "" "$(_k b  "bw/color")"
+    frow "$(_k q  "quit")"    
+    if [[ "$MODE" != "ro" ]]; then
+        fsection "COMMANDS"
+        frow "$(_k h  "honk")"        "" "$(_k f  "flash lights")" ""
+        frow "$(_k l  "lock")"        "" "$(_k o  "open port")"    ""
+        frow "$(_k u  "unlock")"      "" "$(_k P  "charge on")"    ""
+        frow "$(_k C  "climate on")"  "" "$(_k p  "charge stop")"  ""
+        frow "$(_k c  "climate off")" ""
+    fi
+    fblank
+    frow "cmd mode:" "${C_GRY}${MODE}${C_R}" "style:" "${C_GRY}$([[ "${FANCY:-0}" == 1 ]] && echo fancy || echo minimal)${C_R}"
+    frow "refresh:" "${C_GRY}${REFRESH_INTERVAL}s${C_R}" "colors:" \
+	 "${C_GRY}$([[ "${INVERTED:-0}" == 1 ]] && echo inv || echo normal)$([[ "${BW:-0}" == 1 ]] && echo "/bw" || echo "/col")${C_R}"
+    fblank
+    frow "${C_GRY}? close help${C_R}"
+
+    flush_frame
+    CAT_LABELS=$_cat_save
+}
+
+# ── Main render ───────────────────────────────────────────────────────────────
+render() {
+    local d="$1"
+    local UNIT="$2"
+
+    local dist_u="mi" temp_u="°C" press_u="bar"
+    [[ "$UNIT" == "metric" ]] && dist_u="km"
+    [[ "$UNIT" == "us"     ]] && { dist_u="mi"; temp_u="°F"; press_u="psi"; }
+
+    # Extract fields
+    local name model vin state sw swu swua odo
+    name=$(  printf '%s' "$d" | jq -r '.response.vehicle_state.vehicle_name // "Tesla"')
+    model=$( printf '%s' "$d" | jq -r '.response.vehicle_config.car_type // "?" | ascii_upcase')
+    vin=$(   printf '%s' "$d" | jq -r '.response.vin // "?"')
+    state=$( printf '%s' "$d" | jq -r '.response.state // "unknown"')
+    sw=$(    printf '%s' "$d" | jq -r '.response.vehicle_state.car_version // "?" | split(" ")[0]')
+    swu=$(   printf '%s' "$d" | jq -r '.response.vehicle_state.software_update.version // "unknown"')
+    swua=$(  printf '%s' "$d" | jq -r '.response.vehicle_state.software_update.status // "unknown"')
+    odo=$(   printf '%s' "$d" | jq -r '.response.vehicle_state.odometer // 0 | round')
+
+    local bat range chg_state chg_limit chg_mins time chg_kw chg_volts chg_current chg_added bat_heat draw
+    bat=$(         printf '%s' "$d" | jq -r '.response.charge_state.battery_level // 0 | floor')
+    range=$(       printf '%s' "$d" | jq -r '.response.charge_state.battery_range // 0 | round')
+    chg_state=$(   printf '%s' "$d" | jq -r '.response.charge_state.charging_state // "Disconnected"')
+    chg_limit=$(   printf '%s' "$d" | jq -r '.response.charge_state.charge_limit_soc // 0')
+    chg_mins=$(printf '%s' "$d" | jq -r '.response.charge_state.minutes_to_full_charge // 0')
+    chg_mins=72
+    chg_state=Charging
+    time=$(printf "%02d:%02d" $((chg_mins/60)) $((chg_mins%60)))
+    chg_kw=$(      printf '%s' "$d" | jq -r '.response.charge_state.charger_power // 0')
+    chg_volts=$(   printf '%s' "$d" | jq -r '.response.charge_state.charger_voltage // 0')
+    chg_current=$( printf '%s' "$d" | jq -r '.response.charge_state.charge_actual_current // 0')
+    chg_added=$(   printf '%s' "$d" | jq -r '.response.charge_state.charge_energy_added // 0')
+    bat_heat=$(    printf '%s' "$d" | jq -r '.response.charge_state.battery_heater_on // "false"')
+    draw=$(        printf '%s' "$d" | jq -r '.response.drive_state.power // 0')
+
+    local inside outside set_temp climate_on defrost
+    inside=$(    printf '%s' "$d" | jq -r '.response.climate_state.inside_temp // "?"')
+    outside=$(   printf '%s' "$d" | jq -r '.response.climate_state.outside_temp // "?"')
+    set_temp=$(  printf '%s' "$d" | jq -r '.response.climate_state.driver_temp_setting // "?"')
+    climate_on=$(printf '%s' "$d" | jq -r '.response.climate_state.is_climate_on // false')
+    defrost=$(printf '%s' "$d" | jq -r '.response.climate_state.defrost_mode // 0')
+
+    local fl fr rl rr
+    fl=$(printf '%s' "$d" | jq -r '.response.vehicle_state.tpms_pressure_fl' | xargs printf "%.2f")
+    fr=$(printf '%s' "$d" | jq -r '.response.vehicle_state.tpms_pressure_fr' | xargs printf "%.2f")
+    rl=$(printf '%s' "$d" | jq -r '.response.vehicle_state.tpms_pressure_rl' | xargs printf "%.2f")
+    rr=$(printf '%s' "$d" | jq -r '.response.vehicle_state.tpms_pressure_rr' | xargs printf "%.2f")
+
+    local locked sentry valet doors_open
+    locked=$(    printf '%s' "$d" | jq -r '.response.vehicle_state.locked // false')
+    sentry=$(    printf '%s' "$d" | jq -r '.response.vehicle_state.sentry_mode // false')
+    valet=$(     printf '%s' "$d" | jq -r '.response.vehicle_state.valet_mode // false')
+    doors_open=$(printf '%s' "$d" | jq -r '[.response.vehicle_state | .df,.pf,.dr,.pr] | map(select(. > 0)) | length')
+
+    # Conversion to metric if requested
+    [[ "$UNIT" == "metric" ]] && {
+        odo=$(( odo * 160934 / 100000 ))
+        speed=$(( speed * 160934 / 100000 ))
+        range=$(( range * 160934 / 100000 ))
+    }
+
+    # Temps + pressure units based on UNIT
+    if [[ "$UNIT" == "us" ]]; then
+        inside=$(printf '%s' "$d" | jq -r '(.response.climate_state.inside_temp*9/5+32) | round')
+        outside=$(printf '%s' "$d" | jq -r '(.response.climate_state.outside_temp*9/5+32) | round')
+        set_temp=$(printf '%s' "$d" | jq -r '(.response.climate_state.driver_temp_setting*9/5+32) | round')
+        fl=$(printf '%s' "$d" | jq -r '(.response.vehicle_state.tpms_pressure_fl * 14.5037738) | round')
+        fr=$(printf '%s' "$d" | jq -r '(.response.vehicle_state.tpms_pressure_fr * 14.5037738) | round')
+        rl=$(printf '%s' "$d" | jq -r '(.response.vehicle_state.tpms_pressure_rl * 14.5037738) | round')
+        rr=$(printf '%s' "$d" | jq -r '(.response.vehicle_state.tpms_pressure_rr * 14.5037738) | round')
+    fi
+
+    # Derived colors/labels
+    local sc=$C_GRN
+    [[ "$state" == "asleep" || "$state" == "offline" ]] && sc=$C_GRY
+    [[ "$state" == "charging" ]] && sc=$C_YLW
+
+    local bat_bar; bat_bar=$(make_bat_bar "$bat")
+
+    local cs_c=$C_GRY
+    [[ "$chg_state" == "Charging" ]] && cs_c=$C_YLW
+    [[ "$chg_state" == "Complete" ]] && cs_c=$C_GRN
+
+    local clm_c=$C_GRY clm_l="off"
+    [[ "$climate_on" == "true" ]] && { clm_c=$C_GRN; clm_l="on"; }
+
+    local def_c=$C_GRY def_l="off"
+    [[ "$defrost" == "1" ]] && { def_c=$C_YLW; def_l="on"; }
+    [[ "$defrost" == "2" ]] && { def_c=$C_RED; def_l="max"; }
+
+    local bat_c=$C_GRY bat_l="off"
+    [[ "$bat_heat" == "true" ]] && { bat_c=$C_GRN; bat_l="on"; }
+
+    local dra_c=$C_GRY
+    (( draw > 0 )) && dra_c=$C_R
+    (( draw > 1 && draw <= 2 )) && dra_c=$C_YLW
+    (( draw > 2 )) && dra_c=$C_RED
+
+    local lk_c=$C_RED lk_l="unlocked"
+    [[ "$locked"  == "true" ]] && { lk_c=$C_GRN; lk_l="locked"; }
+
+    local sn_c=$C_GRY sn_l="off"
+    [[ "$sentry"  == "true" ]] && { sn_c=$C_GRN; sn_l="active"; }
+
+    local dr_c=$C_GRN dr_l="closed"
+    (( doors_open > 0 )) && { dr_c=$C_RED; dr_l="${doors_open} open"; }
+
+    local vl_c=$C_GRY vl_l="off"
+    [[ "$valet"   == "true" ]] && { vl_c=$C_GRN; vl_l="on"; }
+
+    local mode_c=$C_GRY
+    [[ "$MODE" == "mtm" ]] && mode_c=$C_GRN
+    [[ "$MODE" == "vc" ]] && mode_c=$C_GRN
+
+    # ── Fancy prefixes (icons shown in fancy mode) ─────────────────────────
+    local px_bat="" px_clm="" px_drv="" px_sec=""
+    local I_NEG="$(tput cub 3)"
+    if [[ "${FANCY:-0}" == 1 ]]; then
+        px_bat="⚡ "; px_clm="${I_NEG}🌡 "; px_drv="🚗 "; px_sec="${I_NEG}🛡 "
+    fi
+
+    # ── Build frame ────────────────────────────────────────────────────────
+    frame_start
+    fblank
+    # Title line (no subsection label styling here)
+    CAT_LABELS=0
+    local ts; ts=$(date '+%b %d, %H:%M')
+    frow "${C_B}${C_R}${name} ${model}${C_R}, ${odo} ${dist_u}" "" "${sc}${state}${C_R}" "${C_GRY}[${mode_c}${MODE}${C_R}${C_GRY}]"
+    [[ "$swua" == "available" ]] && upd="${C_BLU}⁺${C_R}"
+    frow "${C_GRY}${vin}${C_R}" "${C_GRY}[v${sw}${C_R}${upd}${C_GRY}]${C_R}" "${C_GRY}${ts}${C_R}" ""
+
+    # Battery + Climate (enable subsection label styling)
+    fsection "${px_bat}ENERGY                          ${px_clm}THERMAL"
+    CAT_LABELS=1
+    added=""
+    if [[ "$chg_state" != "Disconnected" ]]; then
+	added="${C_GRN}+${chg_added} kW${C_R}"
+    fi
+    frow "Battery"   "${bat_bar}"                          "Outside" "${outside}${temp_u}"
+    frow "Range"     "${range} ${dist_u}"                  "Inside"  "${inside}${temp_u}"
+    frow "Draw"      "${dra_c}${draw} kW${C_R}"            "Target"  "${set_temp}${temp_u}"
+    frow "Charge"    "${cs_c}${chg_state}${C_R} ${added}"  "Control"  "${clm_c}${clm_l}${C_R}"
+    frow "Limit"     "${chg_limit}%"                       "Defrost" "${def_c}${def_l}${C_R}"
+    if [[ "$chg_state" != "Disconnected" ]]; then
+	frow "Power"  "${C_YLW}${chg_kw} kW (${chg_volts} V, ${chg_current} A)${C_R}" "Battery" ""
+	frow "End in" "${time}" " heater" "${bat_c}${bat_l}${C_R}"
+    fi
+
+    # Tires + Security
+    fsection "${px_drv}WHEELS                          ${px_sec}PARKING"
+    frow "F left"    "${fl} ${press_u}"                   "Status"  "${lk_c}${lk_l}${C_R}"
+    frow "F right"   "${fr} ${press_u}"                   "Panels"  "${dr_c}${dr_l}${C_R}"
+    frow "R left"    "${rl} ${press_u}"                   "Sentry"  "${sn_c}${sn_l}${C_R}"
+    frow "R right"   "${rr} ${press_u}"                   "Valet"   "${vl_c}${vl_l}${C_R}"
+
+    # Status/cmd feedback (disable subsection label styling)
+    fblank
+    CAT_LABELS=0
+    if [[ -n "$CMD_MSG" ]]; then
+        frow "$CMD_MSG"
+    else
+        frow "${C_GRY}? help${C_R}"
+    fi
+
+    flush_frame
+    CMD_MSG=""
+}
+
+# ── Demo data ─────────────────────────────────────────────────────────────────
+DEMO_DATA='{"response":{"display_name":"My Tesla","vin":"5YJ3E1EA1NF000001",
+"state":"online","vehicle_config":{"car_type":"model3"},
+"vehicle_state":{"odometer":18432,"car_version":"2024.44.30",
+"locked":true,"sentry_mode":true,"valet_mode":false,"df":0,"pf":0,"dr":0,"pr":0},
+"charge_state":{"battery_level":73,"battery_range":218,"charging_state":"Disconnected",
+"charge_limit_soc":80,"time_to_full_charge":0,"charger_power":0,
+"charger_voltage":0,"charge_amps":0},
+"climate_state":{"inside_temp":22.5,"outside_temp":8.0,
+"driver_temp_setting":21.0,"is_climate_on":false},
+"drive_state":{"speed":0,"shift_state":null,"heading":270,
+"latitude":37.4924,"longitude":-122.2577,"power":0}}}'
+
+# ── Arg parsing ───────────────────────────────────────────────────────────────
+usage() {
+    printf 'teslui — A Tesla vehicle dashboard TUI\n\n'
+    printf '  ./teslui [--mode MODE] [--invert] [--fancy]\n\n'
+    printf '  --mode ro|mtm|vc         Command mode: read-only (default), MyTeslaMate (nonfree), vehicle-command\n'
+    printf '  --unit metric|imperial   Set units (metric: km, °C, bar; imperial: mi, °F, psi)\n'
+    printf '  --invert                 Start in inverted color mode\n'
+    printf '  --fancy                  Start with icons style\n\n'
+    printf '  TESLA_REFRESH_TOKEN      Required env var\n'
+    printf '  TESLA_VIN                Optional: pin to a vehicle\n'
+    exit 0
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --mode|-m)
+                shift
+                case "${1:-}" in
+                    ro|readonly|read-only)
+                        MODE=ro ;;
+                    mtm|myteslamate)
+                        MODE=mtm ;;
+                    vc|vehicle-command|vehiclecommand) MODE=vc ;;
+                    *) printf 'Unknown mode: %s\n' "${1:-}" >&2; usage ;;
+                esac ;;
+	    --unit|-u)
+		shift
+		case "${1:-}" in
+		    metric|m) UNIT=metric ;;
+		    us) UNIT=us ;;
+		    *)  UNIT=metric ; printf 'Unknown unit: %s. Defaulting to metric.\n' "${1:-}" >&2 ;;
+		esac ;;
+	    --invert|-i) INVERTED=1; setup_colors ;;
+            --fancy|-f)  FANCY=1 ;;
+            --help|-h)   usage ;;
+            *) printf 'Unknown arg: %s\n' "$1" >&2; usage ;;
+        esac
+        shift
+    done
+}
+
+# ── Handle a keypress ─────────────────────────────────────────────────────────
+# Wait for input
+read_key() {
+    local key
+    if read -r -s -n1 -t "$REFRESH_INTERVAL" key 2>/dev/null; then
+        printf '%s' "$key"
+        return 0
+    fi
+    printf ''   # timeout — empty string signals refresh
+    return 1
+}
+
+# Returns 0 = redraw current data, 1 = fetch fresh data
+handle_key() {
+    local key="$1" vid="$2"
+    case "$key" in
+        q|Q)
+            tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; exit 0 ;;
+        '?')
+            SHOW_HELP=$(( 1 - SHOW_HELP ))
+            return 0 ;;
+        i)
+            INVERTED=$(( 1 - INVERTED ))
+            setup_colors
+            return 0 ;;
+        b)
+            BW=$(( 1 - BW ))
+            setup_colors
+            return 0 ;;
+        c)
+            case "$MODE" in
+                ro)  MODE=mtm ;;
+                mtm) MODE=vc ;;
+                vc)  MODE=ro ;;
+                *)   MODE=ro ;;
+            esac
+            return 0 ;;
+	u)
+	    case "$UNIT" in
+		metric) UNIT=us ;;
+		us)     UNIT=metric ;;
+		*)      UNIT=metric ;;
+	    esac
+	    return 0 ;;
+	s)
+            FANCY=$(( 1 - FANCY ))
+            return 0 ;;
+        r)
+            SHOW_HELP=0
+            return 1 ;;   # fetch fresh
+        +)
+            REFRESH_INTERVAL=$(( REFRESH_INTERVAL + 5 ))
+            (( REFRESH_INTERVAL == 6 )) && REFRESH_INTERVAL=5
+            return 0 ;;
+
+        -)
+            REFRESH_INTERVAL=$(( REFRESH_INTERVAL - 5 ))
+            (( REFRESH_INTERVAL <= 1 )) && REFRESH_INTERVAL=1
+            return 0 ;;
+    esac
+    if [[ "$MODE" != "ro" && $SHOW_HELP -eq 0 ]]; then
+        case "$key" in
+            h) run_cmd "$vid" "honk_horn"               "NOOT NOOT!" ;;
+            f) run_cmd "$vid" "flash_lights"            "Lights flashed" ;;
+            l) run_cmd "$vid" "door_lock"               "Locked" ;;
+            u) run_cmd "$vid" "door_unlock"             "Unlocked" ;;
+            C) run_cmd "$vid" "auto_conditioning_start" "Climate on" ;;
+            c) run_cmd "$vid" "auto_conditioning_stop"  "Climate off" ;;
+            P) run_cmd "$vid" "charge_start"            "Charging started" ;;
+            p) run_cmd "$vid" "charge_stop"             "Charging stopped" ;;
+            o) run_cmd "$vid" "charge_port_door_open"   "Port opened" ;;
+        esac
+    fi
+    return 0
+}
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+main() {
+    parse_args "$@"
+    check_deps
+
+    # Defensive re-read for export timing edge cases
+    [[ -z "$REFRESH_TOKEN" && -n "${TESLA_REFRESH_TOKEN:-}" ]] && REFRESH_TOKEN="$TESLA_REFRESH_TOKEN"
+    [[ -z "$TARGET_VIN"    && -n "${TESLA_VIN:-}"           ]] && TARGET_VIN="$TESLA_VIN"
+
+    # Enter alternate screen, hide cursor
+    tput smcup 2>/dev/null
+    tput civis 2>/dev/null
+    trap 'tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; exit 0' INT TERM EXIT
+
+    # Demo mode
+    if [[ -z "$REFRESH_TOKEN" ]]; then
+        local key
+        while true; do
+            if [[ $SHOW_HELP -eq 1 ]]; then
+                render_help
+            else
+                render "$DEMO_DATA"
+                # overwrite hint line
+                frame_start
+                OUT=""
+                fblank; fcenter "${C_YLW}demo mode — set TESLA_REFRESH_TOKEN to connect${C_R}"
+                # just print at bottom without full redraw
+                printf '%s' "$OUT"
+            fi
+            key=$(read_key || true)
+            handle_key "$key" "" || true
+        done
+    fi
+
+    # Validate mode deps
+    [[ "$MODE" == "mtm" && -z "$MYTESLAMATE_TOKEN" ]] && \
+        die "MYTESLAMATE_TOKEN not set"
+
+    # Auth + vehicle lookup — done before entering TUI
+    tput rmcup 2>/dev/null; tput cnorm 2>/dev/null
+    trap - EXIT
+    printf 'Authenticating…\n'
+    refresh_access_token
+    printf 'Looking up vehicle…\n'
+    local vid; vid=$(get_vehicle_id)
+    [[ -z "$vid" || "$vid" == "null" ]] && die "No vehicle found — check TESLA_VIN or token"
+    printf 'Connected: %s  [%s]\n' "$vid" "$MODE"
+    sleep 1
+
+    # Re-enter TUI
+    tput smcup 2>/dev/null; tput civis 2>/dev/null
+    trap 'tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; exit 0' INT TERM EXIT
+
+    local data="" key rc
+    while true; do
+        # Fetch fresh data
+        data=$(get_data "$vid")
+        if [[ -z "$data" ]]; then
+            wake_up "$vid"
+            data=$(get_data "$vid")
+        fi
+        [[ -z "$data" ]] && { sleep 5; continue; }
+
+        # Inner redraw loop: keep displaying same data until timeout triggers refetch
+        while true; do
+            if [[ $SHOW_HELP -eq 1 ]]; then
+                render_help
+            else
+                render "$data" "$UNIT"
+            fi
+
+            key=$(read_key); rc=$?
+            if [[ $rc -ne 0 || -z "$key" ]]; then
+                break   # timeout → fetch fresh data
+            fi
+
+            handle_key "$key" "$vid"; rc=$?
+            [[ $rc -ne 0 ]] && break   # r pressed → fetch fresh
+        done
+    done
+}
+
+main "$@"
