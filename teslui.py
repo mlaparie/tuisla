@@ -443,7 +443,13 @@ class State:
 
 def render_help(term: Term, c: Colors, st: State) -> None:
     term_w, _ = term.get_size()
-    frame = Frame(term_w=term_w, content_w=min(80, term_w))
+
+    # Match main screen column geometry exactly
+    lbl_w, val_w = 9, 20
+    col_w = 2 + lbl_w + val_w
+    content_w = min((col_w * 2 + 2), term_w)
+
+    frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
     frame.blank()
 
     def kcap(k: str, desc: str) -> str:
