@@ -393,7 +393,7 @@ render_help() {
         frow "$(_k L  "unlock")"      "" "$(_k o  "open port")"    ""
         frow "$(_k l  "lock")"        "" "$(_k p  "charge start")"    ""
         frow "$(_k C  "climate on")"  "" "$(_k P  "charge stop")"  ""
-        frow "$(_k c  "climate off")" "" "$(_k :  "type command")"  ""
+        frow "$(_k c  "climate off")" "" "$(_k :  "enter command")"  ""
     fi
     fblank
     frow "cmd mode:" "${C_GRY}${MODE}${C_R}" "style:" "${C_GRY}$([[ "${FANCY:-0}" == 1 ]] && echo fancy || echo minimal)${C_R}"

@@ -292,7 +292,7 @@ def flush_frame(term: Term, c: Colors, frame: Frame) -> None:
     term.clear_to_end()
     for line in frame.lines:
         term.write((" " * margin) + line + c.R + "\n")
-
+        
 
 def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0) -> str:
     """
@@ -456,27 +456,42 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
     frame.row1(c, kcap("q", "quit"), "")
 
-    frame.section(c, "COMMANDS")
-    frame.row2(c, kcap("h", "honk"), "", kcap("f", "flash lights"), "")
-    frame.row2(c, kcap("L", "unlock"), "", kcap("o", "open port"), "")
-    frame.row2(c, kcap("l", "lock"), "", kcap("p", "charge start"), "")
-    frame.row2(c, kcap("C", "climate on"), "", kcap("P", "charge stop"), "")
-    frame.row2(c, kcap("c", "climate off"), "", kcap(":", "type command"), "")
+    # --- Build COMMANDS section in a separate frame using the SAME formatting ---
+    # This lets us:
+    #  - keep COMMANDS hidden in ro (like bash)
+    #  - still stabilize centering (no jump) by taking cmd_frame.maxvis into account
+    cmd_frame = Frame(term_w=term_w, content_w=frame.content_w, lbl_w=frame.lbl_w, val_w=frame.val_w)
+    cmd_frame.section(c, "COMMANDS")
+    cmd_frame.row2(c, kcap("h", "honk"), "", kcap("f", "flash lights"), "")
+    cmd_frame.row2(c, kcap("L", "unlock"), "", kcap("o", "open port"), "")
+    cmd_frame.row2(c, kcap("l", "lock"), "", kcap("p", "charge start"), "")
+    cmd_frame.row2(c, kcap("C", "climate on"), "", kcap("P", "charge stop"), "")
+    cmd_frame.row2(c, kcap("c", "climate off"), "", kcap(":", "enter command"), "")
+
+    # Stabilize centering width even when COMMANDS is hidden
+    frame.maxvis = max(frame.maxvis, cmd_frame.maxvis)
+
+    # Match bash: only show COMMANDS when not in ro
+    if st.mode != "ro":
+        for s in cmd_frame.lines:
+            frame.fline(s)
 
     frame.blank()
-    frame.row2(c, "mode:", f"{c.GRY}{st.mode}{c.R}", "style:", f"{c.GRY}{'fancy' if c.fancy else 'simple'}{c.R}")
     frame.row2(
         c,
-        "refresh:",
-        f"{c.GRY}{st.refresh_interval}s{c.R}",
-        "colors:",
-        f"{c.GRY}{'inv' if c.inverted else 'normal'}{'/bw' if c.bw else '/col'}{c.R}",
+        "mode:", f"{c.GRY}{st.mode}{c.R}",
+        "style:", f"{c.GRY}{'fancy' if c.fancy else 'minimal'}{c.R}",
+    )
+    frame.row2(
+        c,
+        "refresh:", f"{c.GRY}{st.refresh_interval}s{c.R}",
+        "colors:", f"{c.GRY}{'inv' if c.inverted else 'normal'}{'/bw' if c.bw else '/col'}{c.R}",
     )
     frame.blank()
     frame.row1(c, f"{c.GRY}? close help{c.R}", "")
 
     flush_frame(term, c, frame)
-
+    
 
 def run_cmd(client: TeslaClient, st: State, vid: str, ep: str, label: str, c: Colors) -> str:
     if st.mode == "ro":
