@@ -352,7 +352,7 @@ run_cmd() {
     if [[ "$result" == "true" ]]; then
         CMD_MSG="${C_GRN}✓ ${label}${C_R}"
     else
-        CMD_MSG="${C_RED}✗ ${reason:-failed}${C_R}"
+        CMD_MSG="? help    ${C_RED}✗ ${reason:-failed}${C_R}"
     fi
 }
 
@@ -382,7 +382,7 @@ render_help() {
     _k() { printf "${C_REV} %-1s ${C_R} %s" "$1" "$2"; }
 
     fsection "TESLUI"
-    frow "$(_k c  "command mode")"    "" "$(_k u  "unit")"
+    frow "$(_k m  "command mode")"    "" "$(_k u  "units")"
     frow "$(_k r  "refresh")"     "" "$(_k s  "style")"
     frow "$(_k -  "refresh -5s")" "" "$(_k i  "invert")"
     frow "$(_k +  "refresh +5s")" "" "$(_k b  "bw/color")"
@@ -390,10 +390,10 @@ render_help() {
     if [[ "$MODE" != "ro" ]]; then
         fsection "COMMANDS"
         frow "$(_k h  "honk")"        "" "$(_k f  "flash lights")" ""
-        frow "$(_k l  "lock")"        "" "$(_k o  "open port")"    ""
-        frow "$(_k u  "unlock")"      "" "$(_k P  "charge on")"    ""
-        frow "$(_k C  "climate on")"  "" "$(_k p  "charge stop")"  ""
-        frow "$(_k c  "climate off")" ""
+        frow "$(_k L  "unlock")"      "" "$(_k o  "open port")"    ""
+        frow "$(_k l  "lock")"        "" "$(_k p  "charge start")"    ""
+        frow "$(_k C  "climate on")"  "" "$(_k P  "charge stop")"  ""
+        frow "$(_k c  "climate off")" "" "$(_k :  "type command")"  ""
     fi
     fblank
     frow "cmd mode:" "${C_GRY}${MODE}${C_R}" "style:" "${C_GRY}$([[ "${FANCY:-0}" == 1 ]] && echo fancy || echo minimal)${C_R}"
@@ -541,7 +541,7 @@ render() {
     CAT_LABELS=1
     added=""
     if [[ "$chg_state" != "disconnected" ]]; then
-	added="${C_GRN}+${chg_added} kW${C_R}"
+	added="${C_GRN}+${chg_added} kWh${C_R}"
     fi
     frow "Battery"   "${bat_bar}"                          "Outside" "${outside}${temp_u}"
     frow "Range"     "${range} ${dist_u}"                  "Inside"  "${inside}${temp_u}"
@@ -638,7 +638,7 @@ handle_key() {
     local key="$1" vid="$2"
     case "$key" in
         q|Q)
-            tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; exit 0 ;;
+            tput rmcup 2>/dev/null; tput cnorm 2>/dev/null; printf '\e[?5l'; exit 0 ;;
         '?')
             SHOW_HELP=$(( 1 - SHOW_HELP ))
             return 0 ;;
@@ -650,7 +650,7 @@ handle_key() {
             BW=$(( 1 - BW ))
             setup_colors
             return 0 ;;
-        c)
+        m)
             case "$MODE" in
                 ro)  MODE=mtm ;;
                 mtm) MODE=vc ;;
@@ -682,17 +682,53 @@ handle_key() {
             return 0 ;;
     esac
     if [[ "$MODE" != "ro" && $SHOW_HELP -eq 0 ]]; then
-        case "$key" in
-            h) run_cmd "$vid" "honk_horn"               "NOOT NOOT!" ;;
-            f) run_cmd "$vid" "flash_lights"            "Lights flashed" ;;
-            l) run_cmd "$vid" "door_lock"               "Locked" ;;
-            u) run_cmd "$vid" "door_unlock"             "Unlocked" ;;
-            C) run_cmd "$vid" "auto_conditioning_start" "Climate on" ;;
-            c) run_cmd "$vid" "auto_conditioning_stop"  "Climate off" ;;
-            P) run_cmd "$vid" "charge_start"            "Charging started" ;;
-            p) run_cmd "$vid" "charge_stop"             "Charging stopped" ;;
-            o) run_cmd "$vid" "charge_port_door_open"   "Port opened" ;;
-        esac
+	case "$key" in
+	    h) run_cmd "$vid" "honk_horn"               "NOOT NOOT!" ;;
+	    f) run_cmd "$vid" "flash_lights"            "Lights flashed" ;;
+	    L) run_cmd "$vid" "door_unlock"             "Unlocked" ;;
+	    l) run_cmd "$vid" "door_lock"               "Locked" ;;
+	    C) run_cmd "$vid" "auto_conditioning_start" "Climate on" ;;
+	    c) run_cmd "$vid" "auto_conditioning_stop"  "Climate off" ;;
+	    p) run_cmd "$vid" "charge_start"            "Charging started" ;;
+	    P) run_cmd "$vid" "charge_stop"             "Charging stopped" ;;
+	    o) run_cmd "$vid" "charge_port_door_open"   "Port opened" ;;
+	    :)
+		# Use the line above the last one to avoid scroll on Enter
+		tput cup $(($(tput lines) - 2)) 0
+		tput el
+		printf "${C_B}:${C_R} "
+		tput cnorm
+		local cmd_input=""
+		read -r cmd_input
+		# Cancel if user typed Esc then Enter (ESC is ASCII 27)
+		[[ "$cmd_input" == $'\e' ]] && cmd_input=""
+		tput civis
+
+		# Clear the prompt line after reading
+		tput cup $(($(tput lines) - 2)) 0
+		tput el
+
+		case "$cmd_input" in
+		    honk)            run_cmd "$vid" "honk_horn"                  "NOOT NOOT!" ;;
+		    flash)           run_cmd "$vid" "flash_lights"               "Lights flashed" ;;
+		    lock)            run_cmd "$vid" "door_lock"                  "Locked" ;;
+		    unlock)          run_cmd "$vid" "door_unlock"                "Unlocked" ;;
+		    climate\ on)     run_cmd "$vid" "auto_conditioning_start"    "Climate on" ;;
+		    climate\ off)    run_cmd "$vid" "auto_conditioning_stop"     "Climate off" ;;
+		    charge\ on)      run_cmd "$vid" "charge_start"               "Charging started" ;;
+		    charge\ off)     run_cmd "$vid" "charge_stop"                "Charging stopped" ;;
+		    port\ open)      run_cmd "$vid" "charge_port_door_open"      "Port opened" ;;
+		    port\ close)     run_cmd "$vid" "charge_port_door_close"     "Port closed" ;;
+		    trunk)           run_cmd "$vid" "actuate_trunk"              "Trunk" ;;
+		    frunk)           run_cmd "$vid" "actuate_trunk"              "Frunk" ;;
+		    sentry\ on)      run_cmd "$vid" "set_sentry_mode"            "Sentry on" ;;
+		    sentry\ off)     run_cmd "$vid" "set_sentry_mode"            "Sentry off" ;;
+		    vent)            run_cmd "$vid" "window_control"             "Windows vented" ;;
+		    "")              ;;  # cancelled with enter on empty
+		    *)               CMD_MSG="? help    ${C_RED}Unknown command: ${cmd_input}${C_R}" ;;
+		esac
+		;;
+	esac
     fi
     return 0
 }
@@ -739,7 +775,7 @@ main() {
     printf 'Looking up vehicle…\n'
     local vid; vid=$(get_vehicle_id)
     [[ -z "$vid" || "$vid" == "null" ]] && die "No vehicle found — check TESLA_VIN or token"
-    printf 'Connected: %s  [%s]\n' "$vid" "$MODE"
+    printf 'Connected: %s [%s]\n' "$vid" "$MODE"
     sleep 1
 
     # Re-enter TUI
