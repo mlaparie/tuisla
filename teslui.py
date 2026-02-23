@@ -281,8 +281,31 @@ class Frame:
         self.fline(f"  {c.B}{c.MAG}{title}{c.R}")
 
 
+# Minimum terminal dimensions needed to render the two-column layout cleanly.
+# content_w is capped at 64 (2*col_w+2 where col_w=31), so anything below that
+# means half < 32 and the longest data rows won't fit with the required gap.
+_MIN_TERM_W = 64
+_MIN_TERM_H = 21
+_TOO_SMALL_MSG_W = "Window too narrow: 64x21 required"
+_TOO_SMALL_MSG_H = "Window too short: 64x21 required"
+
+
 def flush_frame(term: Term, c: Colors, frame: Frame) -> None:
-    term_w, _ = term.get_size()
+    term_w, term_h = term.get_size()
+
+    if term_w < _MIN_TERM_W or term_h < _MIN_TERM_H:
+        if term_w < _MIN_TERM_W:
+            msg = f"{_TOO_SMALL_MSG_W} (now {term_w}x{term_h})"
+        else:
+            msg = f"{_TOO_SMALL_MSG_H} (now {term_w}x{term_h})"
+        term.home()
+        term.clear_to_end()
+        msg_vis = vlen(msg)
+        margin = max(0, (term_w - msg_vis) // 2)
+        term.write("\n\n")
+        term.write(f"{' ' * margin}{c.YLW}{c.B}{msg}{c.R}\n")
+        return
+    
     w = min(frame.maxvis, term_w)
     margin = (term_w - w) // 2
     if margin < 0:
@@ -370,21 +393,34 @@ class TeslaClient:
         )
         return self._http(req, ctx=ctx)
 
-    def get_vehicle_id(self, target_vin: str) -> str:
+    def get_vehicle_id_and_vin(self, target_vin: str) -> Tuple[str, str]:
+        """
+        Returns (vehicle_id_s_or_id, vin).
+        vehicle_id_* is used for Owner API /vehicles/{id}/vehicle_data and wake_up.
+        vin is used for mtm/vc command backends.
+        """
         resp = self.api_get("/products")
         items = resp.get("response") or []
         if not isinstance(items, list):
-            return ""
+            return ("", "")
+
+        def pick(it: Dict[str, Any]) -> Tuple[str, str]:
+            vid = str(it.get("id_s") or it.get("id") or "")
+            vin = str(it.get("vin") or "")
+            return (vid, vin)
+
         if target_vin:
             for it in items:
                 if isinstance(it, dict) and it.get("vin") == target_vin:
-                    return str(it.get("id_s") or it.get("id") or "")
-            return ""
+                    return pick(it)
+            return ("", "")
+
         for it in items:
             if isinstance(it, dict) and it.get("vin"):
-                return str(it.get("id_s") or it.get("id") or "")
-        return ""
+                return pick(it)
 
+        return ("", "")
+    
     def wake_up(self, vid: str) -> None:
         try:
             _ = self.api_post(f"{OWNER_API}/vehicles/{vid}/wake_up")
@@ -499,16 +535,16 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     flush_frame(term, c, frame)
     
 
-def run_cmd(client: TeslaClient, st: State, vid: str, ep: str, label: str, c: Colors) -> str:
+def run_cmd(client: TeslaClient, st: State, ep: str, label: str, c: Colors) -> str:
     if st.mode == "ro":
         return f"? help    {c.RED}✗ commands disabled in ro (press m){c.R}"
 
     try:
         if st.mode == "mtm":
-            if not st.myteslamate_token:
-                return f"? help    {c.RED}✗ MYTESLAMATE_TOKEN missing{c.R}"
+            if not st.target_vin:
+                return f"? help    {c.RED}✗ TESLA_VIN missing (could not auto-detect){c.R}"
             url = (
-                f"https://api.myteslamate.com/api/1/vehicles/{vid}/command/{ep}"
+                f"https://api.myteslamate.com/api/1/vehicles/{urllib.parse.quote(st.target_vin)}/command/{ep}"
                 f"?token={urllib.parse.quote(st.myteslamate_token)}"
             )
             resp = client.api_post(url)
@@ -769,23 +805,23 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient], 
             return False
 
         if key == "h":
-            st.cmd_msg = run_cmd(client, st, vid, "honk_horn", "NOOT NOOT!", c)
+            st.cmd_msg = run_cmd(client, st, "honk_horn", "NOOT NOOT!", c)
         elif key == "f":
-            st.cmd_msg = run_cmd(client, st, vid, "flash_lights", "Lights flashed", c)
+            st.cmd_msg = run_cmd(client, st, "flash_lights", "Lights flashed", c)
         elif key == "L":
-            st.cmd_msg = run_cmd(client, st, vid, "door_unlock", "Unlocked", c)
+            st.cmd_msg = run_cmd(client, st, "door_unlock", "Unlocked", c)
         elif key == "l":
-            st.cmd_msg = run_cmd(client, st, vid, "door_lock", "Locked", c)
+            st.cmd_msg = run_cmd(client, st, "door_lock", "Locked", c)
         elif key == "C":
-            st.cmd_msg = run_cmd(client, st, vid, "auto_conditioning_start", "Climate on", c)
+            st.cmd_msg = run_cmd(client, st, "auto_conditioning_start", "Climate on", c)
         elif key == "c":
-            st.cmd_msg = run_cmd(client, st, vid, "auto_conditioning_stop", "Climate off", c)
+            st.cmd_msg = run_cmd(client, st, "auto_conditioning_stop", "Climate off", c)
         elif key == "p":
-            st.cmd_msg = run_cmd(client, st, vid, "charge_start", "Charging started", c)
+            st.cmd_msg = run_cmd(client, st, "charge_start", "Charging started", c)
         elif key == "P":
-            st.cmd_msg = run_cmd(client, st, vid, "charge_stop", "Charging stopped", c)
+            st.cmd_msg = run_cmd(client, st, "charge_stop", "Charging stopped", c)
         elif key == "o":
-            st.cmd_msg = run_cmd(client, st, vid, "charge_port_door_open", "Port opened", c)
+            st.cmd_msg = run_cmd(client, st, "charge_port_door_open", "Port opened", c)
         elif key == ":":
             cmd = prompt_command(term, c)
             cmd_map = {
@@ -804,12 +840,12 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient], 
                 pass
             elif cmd in cmd_map:
                 ep, label = cmd_map[cmd]
-                st.cmd_msg = run_cmd(client, st, vid, ep, label, c)
+                st.cmd_msg = run_cmd(client, st, ep, label, c)
             else:
                 st.cmd_msg = f"? help    {c.RED}Unknown command: {cmd}{c.R}"
 
-        return False
-
+        return True  # force immediate refresh after any command
+    
     return False
 
 
@@ -817,6 +853,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("-m", "--mode", default="ro", choices=["ro", "mtm", "vc"])
     ap.add_argument("-u", "--unit", default="metric", choices=["metric", "us"])
+    ap.add_argument("-r", "--refresh", type=int, default=5, metavar="SECONDS", help="Refresh interval in s (default: 5)")
     ap.add_argument("-i", "--invert", action="store_true")
     ap.add_argument("-s", "--simple", action="store_true", help="Disable fancy style")
     ap.add_argument("-b", "--bw", action="store_true", help="Disable colors")
@@ -825,6 +862,7 @@ def main() -> int:
     st = State(
         mode=args.mode,
         unit=args.unit,
+        refresh_interval=max(1, args.refresh),
         target_vin=os.environ.get("TESLA_VIN", "") or "",
         myteslamate_token=os.environ.get("MYTESLAMATE_TOKEN", "") or "",
         vehicle_command_url=os.environ.get("VEHICLE_COMMAND_URL", "https://localhost:4443") or "https://localhost:4443",
@@ -880,11 +918,16 @@ def main() -> int:
         term.write("Authenticating…\n")
         client.refresh_access_token()
         term.write("Looking up vehicle…\n")
-        vid = client.get_vehicle_id(st.target_vin)
-        term.write(f"Connected: {vid} [{st.mode}]\n")
+        vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
+
+        # If TESLA_VIN wasn't provided, auto-fill it from /products so commands can work.
+        if not st.target_vin and vin:
+            st.target_vin = vin
+
+        term.write(f"Connected: {st.target_vin or '?VIN?'} (vid {vid}) [{st.mode}]\n")
         if not vid:
             die("No vehicle found — check TESLA_VIN or token")
-
+            
         time.sleep(0.5)
 
         data: Optional[Dict[str, Any]] = None
