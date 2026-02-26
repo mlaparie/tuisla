@@ -1170,7 +1170,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
 
     dist_u  = "km"  if st.unit == "metric" else "mi"
-    temp_u  = "C"   if st.unit == "metric" else "F"
+    temp_u  = "°C"   if st.unit == "metric" else "°F"
     press_u = "bar" if st.unit == "metric" else "psi"
 
     name   = str(jget(data, "response.vehicle_state.vehicle_name", "Tesla"))
