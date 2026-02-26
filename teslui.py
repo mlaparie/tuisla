@@ -24,6 +24,7 @@ import json
 import os
 import re
 import ssl
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -31,7 +32,7 @@ import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
 OWNER_API = "https://owner-api.teslamotors.com/api/1"
-AUTH_URL = "https://auth.tesla.com/oauth2/v3/token"
+AUTH_URL  = "https://auth.tesla.com/oauth2/v3/token"
 OWNER_CLIENT_ID = "ownerapi"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\x1b\(B")
@@ -48,10 +49,7 @@ DEMO_DATA = {
             "locked": True,
             "sentry_mode": True,
             "valet_mode": False,
-            "df": 0,
-            "pf": 0,
-            "dr": 0,
-            "pr": 0,
+            "df": 0, "pf": 0, "dr": 0, "pr": 0,
             "software_update": {"version": "2026.2.6", "status": "available"},
             "tpms_pressure_fl": 3.00,
             "tpms_pressure_fr": 3.05,
@@ -81,6 +79,78 @@ DEMO_DATA = {
     }
 }
 
+# =============================================================================
+#  Command registry
+#  (display_name, endpoint, fixed_body_or_None, help_text)
+#
+#  display_name may contain <arg> placeholders.  For each placeholder the
+#  matching positional word typed by the user is injected into the body dict.
+#  Placeholder names must match the corresponding body key, e.g.
+#      "charge limit <percent>"  ->  body key "percent"
+# =============================================================================
+CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
+    # ── Security ────────────────────────────────────────────────────────────
+    ("sentry on",               "set_sentry_mode",                  {"on": True},                               "Enable Sentry Mode"),
+    ("sentry off",              "set_sentry_mode",                  {"on": False},                              "Disable Sentry Mode"),
+    ("valet on <password>",     "set_valet_mode",                   {"on": True,  "password": None},            "Enable valet mode (e.g. valet on 1234)"),
+    ("valet off",               "set_valet_mode",                   {"on": False, "password": ""},              "Disable valet mode"),
+    ("honk",                    "honk_horn",                        None,                                       "Honk the horn"),
+    ("flash",                   "flash_lights",                     None,                                       "Flash the lights"),
+    ("remote start",            "remote_start_drive",               None,                                       "Remote start the car"),
+    # ── Locking ─────────────────────────────────────────────────────────────
+    ("lock",                    "door_lock",                        None,                                       "Lock the doors"),
+    ("unlock",                  "door_unlock",                      None,                                       "Unlock the doors"),
+    ("windows vent",            "window_control",                   {"command": "vent",  "lat": 0, "lon": 0},   "Vent all windows"),
+    ("windows close",           "window_control",                   {"command": "close", "lat": 0, "lon": 0},   "Close all windows"),
+    ("trunk toggle",            "actuate_trunk",                    {"which_trunk": "rear"},                    "Toggle the rear trunk"),
+    ("frunk open",              "actuate_trunk",                    {"which_trunk": "front"},                   "Open the frunk"),
+    # ── Charging ────────────────────────────────────────────────────────────
+    ("charge start",            "charge_start",                     None,                                       "Start charging"),
+    ("charge stop",             "charge_stop",                      None,                                       "Stop charging"),
+    ("charge limit <percent>",  "set_charge_limit",                 {"percent": None},                          "Set charge limit % (e.g. charge limit 80)"),
+    ("charge amps <charging_amps>", "set_charging_amps",            {"charging_amps": None},                    "Set charging amps (e.g. charge amps 16)"),
+    ("port open",               "charge_port_door_open",            None,                                       "Open the charge port"),
+    ("port close",              "charge_port_door_close",           None,                                       "Close the charge port"),
+    # ── Climate ─────────────────────────────────────────────────────────────
+    ("climate on",              "auto_conditioning_start",          None,                                       "Turn climate on"),
+    ("climate off",             "auto_conditioning_stop",           None,                                       "Turn climate off"),
+    ("temp <temp>",             "set_temps",                        {"driver_temp": None, "passenger_temp": 0}, "Set both seats temp C (e.g. temp 21)"),
+    ("temp_driver <temp>",   "set_temps",                           {"driver_temp": None, "passenger_temp": 0}, "Set driver temp C only (e.g. driver temp 21)"),
+    ("temp_passenger <temp>", "set_temps",                          {"driver_temp": 0, "passenger_temp": None}, "Set passenger temp C only (e.g. passenger temp 19)"),
+    ("defrost on",              "set_preconditioning_max",          {"on": True},                               "Enable max defrost/preconditioning"),
+    ("defrost off",             "set_preconditioning_max",          {"on": False},                              "Disable max defrost/preconditioning"),
+    ("seat heat <seat> <level>","remote_seat_heater_request",       {"heater": None, "level": None},            "Seat heat: seat 0-4, level 0-3 (e.g. seat heat 0 2)"),
+    ("steering heat on",        "remote_steering_wheel_heater_request", {"on": True},                           "Steering wheel heater on"),
+    ("steering heat off",       "remote_steering_wheel_heater_request", {"on": False},                          "Steering wheel heater off"),
+    # ── Settings ────────────────────────────────────────────────────────────
+    ("speed limit on <pin>",    "speed_limit_activate",             {"pin": None},                              "Activate speed limit (e.g. speed limit on 1234)"),
+    ("speed limit off <pin>",   "speed_limit_deactivate",           {"pin": None},                              "Deactivate speed limit (e.g. speed limit off 1234)"),
+    ("speed limit set <limit_mph>", "speed_limit_set_limit",        {"limit_mph": None},                        "Set speed limit mph 50-90"),
+    ("speed limit clear <pin>", "speed_limit_clear_pin",            {"pin": None},                              "Clear speed limit PIN"),
+    ("sunroof vent",            "sun_roof_control",                 {"state": "vent"},                          "Vent the sunroof"),
+    ("sunroof close",           "sun_roof_control",                 {"state": "close"},                         "Close the sunroof"),
+    # ── Media ────────────────────────────────────────────────────────────────
+    ("media play",              "media_toggle_playback",            None,                                       "Toggle media playback"),
+    ("media next",              "media_next_track",                 None,                                       "Next track"),
+    ("media prev",              "media_prev_track",                 None,                                       "Previous track"),
+    ("media vol up",            "media_volume_up",                  None,                                       "Volume up"),
+    ("media vol down",          "media_volume_down",                None,                                       "Volume down"),
+    # ── Miscellaneous ────────────────────────────────────────────────────────
+    ("homelink",                "trigger_homelink",                 {"lat": 0, "lon": 0},                       "Trigger Homelink garage opener"),
+    ("update start",            "schedule_software_update",         {"offset_sec": 0},                          "Start pending software update now"),
+    ("update cancel",           "cancel_software_update",           None,                                       "Cancel a pending software update"),
+]
+
+# Build keyword->(endpoint, body_template, help) lookup.
+# Key is the static prefix of the display_name (before any <placeholder>).
+_CMD_LOOKUP: Dict[str, Tuple[str, Optional[Dict[str, Any]], str]] = {}
+for _name, _ep, _body, _help in CMD_REGISTRY:
+    _key = re.split(r"\s+<", _name)[0]
+    _CMD_LOOKUP[_key] = (_ep, _body, _help)
+
+# Static key names used for tab-completion (no <placeholders>).
+CMD_KEYS: List[str] = list(_CMD_LOOKUP.keys())
+
 
 def die(msg: str) -> None:
     raise SystemExit(msg)
@@ -107,15 +177,27 @@ def jget(d: Dict[str, Any], path: str, default: Any = None) -> Any:
     return cur
 
 
+def _longest_common_prefix(strings: List[str]) -> str:
+    """Return the longest string that is a prefix of every element."""
+    if not strings:
+        return ""
+    prefix = strings[0]
+    for s in strings[1:]:
+        while not s.startswith(prefix):
+            prefix = prefix[:-1]
+            if not prefix:
+                return ""
+    return prefix
+
+
 @dataclasses.dataclass
 class Colors:
     fancy: bool = True
     inverted: bool = False
     bw: bool = False
 
-    # reset/bold/dim/rev
-    R: str = "\x1b[0m"
-    B: str = "\x1b[1m"
+    R:   str = "\x1b[0m"
+    B:   str = "\x1b[1m"
     DIM: str = "\x1b[2m"
     REV: str = "\x1b[7m"
 
@@ -138,17 +220,15 @@ class Colors:
         self.apply_bw()
 
     def apply_bw(self) -> None:
-        self.R = self._base["R"]; self.B = self._base["B"]; self.DIM = self._base["DIM"]; self.REV = self._base["REV"]
-        self.RED = self._base["RED"]; self.GRN = self._base["GRN"]; self.YLW = self._base["YLW"]; self.BLU = self._base["BLU"]
-        self.MAG = self._base["MAG"]; self.CYN = self._base["CYN"]; self.GRY = self._base["GRY"]
-
+        self.R   = self._base["R"];   self.B   = self._base["B"]
+        self.DIM = self._base["DIM"]; self.REV = self._base["REV"]
+        self.RED = self._base["RED"]; self.GRN = self._base["GRN"]
+        self.YLW = self._base["YLW"]; self.BLU = self._base["BLU"]
+        self.MAG = self._base["MAG"]; self.CYN = self._base["CYN"]
+        self.GRY = self._base["GRY"]
         if self.bw:
-            self.RED = ""
-            self.GRN = ""
-            self.YLW = ""
-            self.BLU = ""
-            self.MAG = ""
-            self.CYN = ""
+            self.RED = ""; self.GRN = ""; self.YLW = ""
+            self.BLU = ""; self.MAG = ""; self.CYN = ""
             self.GRY = "\x1b[90m"
 
 
@@ -228,11 +308,30 @@ class Term:
                 time.sleep(0.01)
             return None
         else:
-            import select
-            r, _, _ = select.select([sys.stdin], [], [], timeout_s)
-            if not r:
-                return None
-            return sys.stdin.read(1)
+            import select, signal
+            # Self-pipe trick: SIGWINCH wakes select() so resize redraws immediately.
+            pipe_r, pipe_w = os.pipe()
+            def _sigwinch(signum: int, frame: Any) -> None:
+                try:
+                    os.write(pipe_w, b"\x00")
+                except OSError:
+                    pass
+            old_handler = signal.signal(signal.SIGWINCH, _sigwinch)
+            try:
+                r, _, _ = select.select([sys.stdin, pipe_r], [], [], timeout_s)
+                if pipe_r in r:
+                    try:
+                        os.read(pipe_r, 64)
+                    except OSError:
+                        pass
+                    return None
+                if not r:
+                    return None
+                return sys.stdin.read(1)
+            finally:
+                signal.signal(signal.SIGWINCH, old_handler)
+                os.close(pipe_r)
+                os.close(pipe_w)
 
 
 @dataclasses.dataclass
@@ -261,12 +360,10 @@ class Frame:
                 return f"{c.GRY}{c.REV} {txt:<{self.lbl_w-1}}{c.R}"
             return f"{c.GRY}{txt:<{self.lbl_w}}{c.R}"
 
-        left = f"{label_cell(ll)} {vl}"
+        left  = f"{label_cell(ll)} {vl}"
         right = f"{label_cell(lr)} {vr}"
-        lvis = vlen(left)
-        pad = (half - lvis - 2)
-        if pad < 0:
-            pad = 0
+        lvis  = vlen(left)
+        pad   = max(0, half - lvis - 2)
         self.fline(f"  {left}{' ' * pad}  {right}")
 
     def row1(self, c: Colors, label: str, val: str) -> None:
@@ -281,16 +378,14 @@ class Frame:
         self.fline(f"  {c.B}{c.MAG}{title}{c.R}")
 
 
-# Minimum terminal dimensions needed to render the two-column layout cleanly.
-# content_w is capped at 64 (2*col_w+2 where col_w=31), so anything below that
-# means half < 32 and the longest data rows won't fit with the required gap.
 _MIN_TERM_W = 64
 _MIN_TERM_H = 21
 _TOO_SMALL_MSG_W = "Window too narrow: 64x21 required"
 _TOO_SMALL_MSG_H = "Window too short: 64x21 required"
 
 
-def flush_frame(term: Term, c: Colors, frame: Frame) -> None:
+def flush_frame(term: Term, c: Colors, frame: Frame) -> int:
+    """Write frame to terminal. Returns the 0-based row of the last line written."""
     term_w, term_h = term.get_size()
 
     if term_w < _MIN_TERM_W or term_h < _MIN_TERM_H:
@@ -301,41 +396,39 @@ def flush_frame(term: Term, c: Colors, frame: Frame) -> None:
         term.home()
         term.clear_to_end()
         msg_vis = vlen(msg)
-        margin = max(0, (term_w - msg_vis) // 2)
+        margin  = max(0, (term_w - msg_vis) // 2)
         term.write("\n\n")
         term.write(f"{' ' * margin}{c.YLW}{c.B}{msg}{c.R}\n")
-        return
-    
-    w = min(frame.maxvis, term_w)
-    margin = (term_w - w) // 2
-    if margin < 0:
-        margin = 0
+        return 2
 
+    w      = min(frame.maxvis, term_w)
+    margin = max(0, (term_w - w) // 2)
     term.home()
     term.clear_to_end()
     for line in frame.lines:
         term.write((" " * margin) + line + c.R + "\n")
-        
+    return len(frame.lines) - 1
+
 
 def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0) -> str:
-    """
-    Place RIGHT at a fixed start column (start of right pane), with an optional
-    left shift (used in fancy mode to compensate icon prefixes like "⚡ ").
-    """
-    half = content_w // 2
+    half        = content_w // 2
     right_start = half - shift_left
-
-    lvis = vlen(left)
-    gap = max(2, right_start - lvis)
+    lvis        = vlen(left)
+    gap         = max(2, right_start - lvis)
     return f"{left}{' ' * gap}{right}"
 
+
+# =============================================================================
+#  Tesla API client
+# =============================================================================
 
 class TeslaClient:
     def __init__(self, refresh_token: str) -> None:
         self.refresh_token = refresh_token
-        self.access_token = ""
+        self.access_token  = ""
 
-    def _http(self, req: urllib.request.Request, ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
+    def _http(self, req: urllib.request.Request,
+              ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
         try:
             with urllib.request.urlopen(req, context=ctx, timeout=20) as r:
                 data = r.read().decode("utf-8", "replace")
@@ -348,19 +441,17 @@ class TeslaClient:
 
     def refresh_access_token(self) -> None:
         form = urllib.parse.urlencode({
-            "grant_type": "refresh_token",
-            "client_id": OWNER_CLIENT_ID,
+            "grant_type":    "refresh_token",
+            "client_id":     OWNER_CLIENT_ID,
             "refresh_token": self.refresh_token,
-            "scope": "openid email offline_access",
+            "scope":         "openid email offline_access",
         }).encode("utf-8")
-        req = urllib.request.Request(
-            AUTH_URL,
-            method="POST",
-            data=form,
+        req  = urllib.request.Request(
+            AUTH_URL, method="POST", data=form,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
         )
         resp = self._http(req)
-        at = resp.get("access_token") or ""
+        at   = resp.get("access_token") or ""
         if not at:
             raise RuntimeError("Token refresh failed (missing access_token)")
         self.access_token = at
@@ -370,36 +461,30 @@ class TeslaClient:
 
     def api_get(self, path: str) -> Dict[str, Any]:
         req = urllib.request.Request(
-            OWNER_API + path,
-            method="GET",
+            OWNER_API + path, method="GET",
             headers={
                 "Authorization": f"Bearer {self.access_token}",
-                "Content-Type": "application/json",
-                "User-Agent": "teslui/1.0",
+                "Content-Type":  "application/json",
+                "User-Agent":    "teslui/1.0",
             },
         )
         return self._http(req)
 
-    def api_post(self, url: str, ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
+    def api_post(self, url: str, body: Optional[Dict[str, Any]] = None,
+                 ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
+        payload = json.dumps(body).encode("utf-8") if body else b""
         req = urllib.request.Request(
-            url,
-            method="POST",
-            data=b"",
+            url, method="POST", data=payload,
             headers={
                 "Authorization": f"Bearer {self.access_token}",
-                "Content-Type": "application/json",
-                "User-Agent": "teslui/1.0",
+                "Content-Type":  "application/json",
+                "User-Agent":    "teslui/1.0",
             },
         )
         return self._http(req, ctx=ctx)
 
     def get_vehicle_id_and_vin(self, target_vin: str) -> Tuple[str, str]:
-        """
-        Returns (vehicle_id_s_or_id, vin).
-        vehicle_id_* is used for Owner API /vehicles/{id}/vehicle_data and wake_up.
-        vin is used for mtm/vc command backends.
-        """
-        resp = self.api_get("/products")
+        resp  = self.api_get("/products")
         items = resp.get("response") or []
         if not isinstance(items, list):
             return ("", "")
@@ -414,36 +499,817 @@ class TeslaClient:
                 if isinstance(it, dict) and it.get("vin") == target_vin:
                     return pick(it)
             return ("", "")
-
         for it in items:
             if isinstance(it, dict) and it.get("vin"):
                 return pick(it)
-
         return ("", "")
-    
+
     def wake_up(self, vid: str) -> None:
         try:
-            _ = self.api_post(f"{OWNER_API}/vehicles/{vid}/wake_up")
+            self.api_post(f"{OWNER_API}/vehicles/{vid}/wake_up")
         except Exception:
             pass
 
     def get_vehicle_data(self, vid: str) -> Optional[Dict[str, Any]]:
         resp = self.api_get(f"/vehicles/{vid}/vehicle_data")
-        vin = jget(resp, "response.vin", "")
+        vin  = jget(resp, "response.vin", "")
         return resp if vin else None
 
 
-def make_bat_bar(c: Colors, pct: int, width: int = 12) -> str:
-    pct = clamp_int(int(pct), 0, 100)
-    filled = (pct * width) // 100
-    empty = width - filled
-    if pct >= 70:
-        col = c.GRN
-    elif pct >= 30:
-        col = c.YLW
+# =============================================================================
+#  Logging
+# =============================================================================
+
+LOG_FILE = "teslui.log"
+
+
+def log_cmd(ep: str, result: str) -> None:
+    ts    = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    entry = f"{ts} - {ep} - {strip_ansi(result)}\n"
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(entry)
+    except OSError:
+        pass
+
+
+# =============================================================================
+#  Command execution
+# =============================================================================
+
+def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
+            body: Optional[Dict[str, Any]], c: Colors) -> str:
+    if st.mode == "ro":
+        result = f"h help    {c.RED}X commands disabled in ro (press m){c.R}"
+        log_cmd(ep, result)
+        return result
+
+    try:
+        if st.mode == "mtm":
+            if not st.target_vin:
+                result = f"h help    {c.RED}X TESLA_VIN missing{c.R}"
+                log_cmd(ep, result)
+                return result
+            if not st.myteslamate_token:
+                result = f"h help    {c.RED}X MYTESLAMATE_TOKEN missing{c.R}"
+                log_cmd(ep, result)
+                return result
+            url  = (
+                f"https://api.myteslamate.com/api/1/vehicles"
+                f"/{urllib.parse.quote(st.target_vin)}/command/{ep}"
+                f"?token={urllib.parse.quote(st.myteslamate_token)}"
+            )
+            resp = client.api_post(url, body)
+        elif st.mode == "vc":
+            if not st.target_vin:
+                result = f"h help    {c.RED}X TESLA_VIN required for vc{c.R}"
+                log_cmd(ep, result)
+                return result
+            cafile = st.vehicle_command_cert or "cert.pem"
+            ctx    = ssl.create_default_context(cafile=cafile)
+            base   = st.vehicle_command_url.rstrip("/")
+            url    = f"{base}/api/1/vehicles/{urllib.parse.quote(st.target_vin)}/command/{ep}"
+            resp   = client.api_post(url, body, ctx=ctx)
+    except Exception as e:
+        result = f"h help    {c.RED}X {str(e)[:80]}{c.R}"
+        log_cmd(ep, result)
+        return result
+
+    ok     = bool(jget(resp, "response.result", False))
+    reason = str(jget(resp, "response.reason", "") or jget(resp, "error", "") or "failed")
+    result = (f"h help    {c.GRN}✓ {label}{c.R}") if ok else (f"h help    {c.RED}X {reason}{c.R}")
+    log_cmd(ep, result)
+    return result
+
+
+# =============================================================================
+#  Interactive command prompt  (raw-mode, tab-complete, Esc to cancel)
+#
+#  Tab-completion uses CMD_KEYS (static key names, no <placeholders>).
+#  Algorithm (bash-style):
+#    1. Compute LCP of all keys that start with the current buffer.
+#    2. If LCP extends the buffer -> fill to LCP, no candidate list yet.
+#    3. If already at LCP (no progress) -> show candidates on line above.
+#    4. Unique match at any point -> fill entire key + trailing space.
+# =============================================================================
+
+def prompt_command(term: Term, c: Colors, st: "State") -> Optional[str]:
+    """Returns the typed string, or None if cancelled (Esc / idle timeout)."""
+    term_w, term_h = term.get_size()
+    lbl_w   = 9
+    col_w   = 2 + lbl_w + 20
+    content_w = min(col_w * 2 + 2, term_w)
+    margin  = max(0, (term_w - min(content_w, term_w)) // 2)
+
+    row = st.prompt_row
+    col = st.prompt_col          # right after "h help" label
+    avail = term_w - col - 2     # chars available on the prompt line
+
+    buf: List[str] = []
+
+    def erase_prompt() -> None:
+        term.move(row, col)
+        term.write("\x1b[K")     # erase to end of line
+
+    def redraw() -> None:
+        erase_prompt()
+        term.write(f"{c.B}:{c.R} {''.join(buf)}")
+
+    def erase_candidates() -> None:
+        for r in (row + 1, row + 2, row + 3):
+            term.move(r, margin)
+            term.write("\x1b[K")
+
+    term.cursor(True)
+    redraw()
+
+    import select as _sel
+
+    while True:
+        try:
+            r, _, _ = _sel.select([sys.stdin], [], [], 120)
+        except Exception:
+            break
+        if not r:
+            break
+
+        ch = sys.stdin.read(1)
+
+        if ch == "\x1b":
+            erase_prompt()
+            erase_candidates()
+            term.cursor(False)
+            return None
+
+        if ch in ("\r", "\n"):
+            erase_prompt()
+            erase_candidates()
+            term.cursor(False)
+            return "".join(buf).strip()
+
+        if ch in ("\x7f", "\x08"):
+            if buf:
+                buf.pop()
+                redraw()
+            continue
+
+        if ch == "\t":
+            partial = "".join(buf)
+            matches = [k for k in CMD_KEYS if k.startswith(partial)]
+
+            if not matches:
+                pass
+            elif len(matches) == 1:
+                buf = list(matches[0]) + [" "]
+                erase_candidates()
+                redraw()
+            else:
+                lcp = _longest_common_prefix(matches)
+                if lcp != partial:
+                    buf = list(lcp)
+                    erase_candidates()
+                    redraw()
+                else:
+                    # Collapse alias siblings, then wrap across up to 4 lines
+                    displayed: List[str] = []
+                    seen_alias: set = set()
+                    for m in matches:
+                        alias = next(
+                            (d for d, (_, keys) in _PAGER_ALIASES.items() if m in keys),
+                            None
+                        )
+                        if alias:
+                            if alias not in seen_alias:
+                                seen_alias.add(alias)
+                                displayed.append(re.split(r"\s+<", alias)[0])
+                        else:
+                            displayed.append(m)
+                    erase_candidates()
+                    line_w = content_w - 2
+                    out_lines: List[str] = [""]
+                    for token in displayed:
+                        tok = token + "  "
+                        if len(out_lines[-1]) + len(tok) > line_w:
+                            if len(out_lines) >= 4:
+                                out_lines[-1] = out_lines[-1].rstrip() + "  (+more)"
+                                break
+                            out_lines.append("")
+                        out_lines[-1] += tok
+                    for i, ln in enumerate(out_lines):
+                        term.move(row + 2 + i, margin + 5)
+                        term.write(f"{c.GRY}{ln.rstrip()}{c.R}")
+                    redraw()
+            continue
+
+        if ch.isprintable():
+            buf.append(ch)
+            redraw()
+
+    erase_prompt()
+    erase_candidates()
+    term.cursor(False)
+    return None
+
+
+def parse_and_run_cmd(term: Term, c: Colors, client: TeslaClient,
+                      st: "State") -> str:
+    """
+    Prompt -> parse -> dispatch to run_cmd.
+    Typing "help" opens the command pager (same as pressing ?).
+    """
+    raw = prompt_command(term, c, st)
+    if raw is None or raw == "":
+        return ""
+
+    # "help" at the prompt -> open command pager inline
+    if raw.strip().lower() == "help":
+        show_cmd_pager(term, c)
+        return ""
+
+    tokens = raw.strip().split()
+
+    # Find the longest matching static prefix key
+    best_key: Optional[str]              = None
+    best_ep:  Optional[str]              = None
+    best_tpl: Optional[Dict[str, Any]]   = None
+    best_len: int                        = -1
+
+    for key, (ep, tpl, _help) in _CMD_LOOKUP.items():
+        key_tokens = key.split()
+        n = len(key_tokens)
+        if tokens[:n] == key_tokens and n > best_len:
+            best_key  = key
+            best_ep   = ep
+            best_tpl  = tpl
+            best_len  = n
+
+    if best_key is None or best_ep is None:
+        result = f"h help    {c.RED}Unknown command: {raw}{c.R}"
+        log_cmd(raw, result)
+        return result
+
+    arg_tokens = tokens[best_len:]
+
+    body: Optional[Dict[str, Any]] = None
+    if best_tpl is not None:
+        body    = dict(best_tpl)
+        arg_idx = 0
+        for k, v in body.items():
+            if v is None:
+                if arg_idx >= len(arg_tokens):
+                    result = f"h help    {c.RED}X missing argument for '{best_key}'{c.R}"
+                    log_cmd(best_ep, result)
+                    return result
+                raw_val = arg_tokens[arg_idx]
+                arg_idx += 1
+                try:
+                    body[k] = int(raw_val)
+                except ValueError:
+                    try:
+                        body[k] = float(raw_val)
+                    except ValueError:
+                        body[k] = raw_val
+        if best_ep == "set_temps" and "driver_temp" in body:
+            if body.get("passenger_temp") == 0 and body["driver_temp"] != 0:
+                body["passenger_temp"] = body["driver_temp"]
+
+    label = best_key.title()
+    return run_cmd(client, st, best_ep, label, body, c)
+
+
+# =============================================================================
+#  State
+# =============================================================================
+
+@dataclasses.dataclass
+class State:
+    mode: str = "ro"
+    unit: str = "metric"
+    refresh_interval: int = 5
+    show_help: bool = False
+    show_cmd_pager: bool = False
+    cmd_msg: str = ""
+    prompt_row: int = 0          # row of the last status line, set by flush_frame
+    prompt_col: int = 0          # col of the prompt cursor, set by render_dashboard
+    target_vin: str = ""
+    myteslamate_token: str = ""
+    vehicle_command_url: str = "https://localhost:4443"
+    vehicle_command_cert: str = "cert.pem"
+
+
+# =============================================================================
+#  Render: help overlay
+# =============================================================================
+
+def render_help(term: Term, c: Colors, st: State) -> None:
+    term_w, _ = term.get_size()
+    lbl_w, val_w = 9, 20
+    col_w    = 2 + lbl_w + val_w
+    content_w = min((col_w * 2 + 2), term_w)
+
+    frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
+    frame.blank()
+
+    def kcap(k: str, desc: str) -> str:
+        return f"{c.REV} {k:<1} {c.R} {desc}"
+
+    frame.section(c, "TESLUI")
+    frame.row2(c, kcap("m", "mode"),        "", kcap("u", "units"),    "")
+    frame.row2(c, kcap("r", "refresh"),     "", kcap("s", "style"),    "")
+    frame.row2(c, kcap("-", "refresh -5s"), "", kcap("i", "invert"),   "")
+    frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
+    frame.row1(c, kcap("q", "quit"), "")
+
+    cmd_frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
+    cmd_frame.section(c, "COMMANDS")
+    cmd_frame.row2(c, kcap("H", "honk"),        "", kcap("f", "flash lights"), "")
+    cmd_frame.row2(c, kcap("L", "unlock"),      "", kcap("o", "open port"),    "")
+    cmd_frame.row2(c, kcap("l", "lock"),        "", kcap("p", "charge start"), "")
+    cmd_frame.row2(c, kcap("C", "climate on"),  "", kcap("P", "charge stop"),  "")
+    cmd_frame.row2(c, kcap("c", "climate off"), "", kcap(":", "enter command"),"")
+    cmd_frame.row2(c, kcap("?", "all commands"), "", kcap("z", "show log"),   "")
+
+    frame.maxvis = max(frame.maxvis, cmd_frame.maxvis)
+
+    if st.mode != "ro":
+        for s in cmd_frame.lines:
+            frame.fline(s)
+
+    frame.blank()
+    frame.row2(c, "mode:",    f"{c.GRY}{st.mode}{c.R}",
+                  "style:",   f"{c.GRY}{'fancy' if c.fancy else 'minimal'}{c.R}")
+    frame.row2(c, "refresh:", f"{c.GRY}{st.refresh_interval}s{c.R}",
+                  "colors:",  f"{c.GRY}{'inv' if c.inverted else 'normal'}{'/bw' if c.bw else '/col'}{c.R}")
+    frame.blank()
+    frame.row1(c, f"{c.GRY}h close help{c.R}", "")
+
+    flush_frame(term, c, frame)
+
+
+# =============================================================================
+#  Command pager
+#
+#  Pressing ? (or typing "help" at the : prompt) opens this.
+#  Runs a built-in pager:
+#    j/k   scroll 1 line down/up
+#    d/u   scroll half-page down/up
+#    g/G   jump to top/bottom
+#    /     keyword search (regex, case-insensitive)
+#    n/N   next/previous search match
+#    q/Esc close
+# =============================================================================
+
+_PAGER_CATS: List[Tuple[str, Tuple[str, ...]]] = [
+    ("Security",      ("set_sentry", "set_valet", "honk_horn", "flash_lights", "remote_start")),
+    ("Locking",       ("door_lock", "door_unlock", "window_control", "actuate_trunk")),
+    ("Charging",      ("charge_start", "charge_stop", "set_charge", "set_charging", "charge_port")),
+    ("Climate",       ("auto_conditioning", "set_temps", "set_preconditioning", "remote_seat", "remote_steering")),
+    ("Settings",      ("speed_limit", "sun_roof")),
+    ("Media",         ("media_",)),
+    ("Miscellaneous", ("trigger_homelink", "schedule_software", "cancel_software")),
+]
+
+
+def _pager_cat(ep: str) -> str:
+    for label, prefixes in _PAGER_CATS:
+        for pfx in prefixes:
+            if ep.startswith(pfx):
+                return label
+    return "Other"
+
+
+# Pairs/groups of registry keys rendered as one merged line in the pager and
+# collapsed to a single hint token in tab-completion suggestions.
+# Format:  display_string -> (merged_help, [key1, key2, …])
+# key1 is the canonical entry; key2+ are suppressed from individual rendering.
+_PAGER_ALIASES: Dict[str, Tuple[str, List[str]]] = {
+    "sentry on|off":            ("Enable/disable Sentry Mode",                   ["sentry on",        "sentry off"]),
+    "valet on|off":             ("Enable/disable valet mode (valet on <pwd>)",    ["valet on",         "valet off"]),
+    "honk|flash":               ("Honk the horn / flash the lights",              ["honk",             "flash"]),
+    "lock|unlock":              ("Lock/unlock the doors",                         ["lock",             "unlock"]),
+    "windows vent|close":       ("Vent/close all windows",                        ["windows vent",     "windows close"]),
+    "trunk toggle|frunk open":  ("Toggle trunk / open frunk",                     ["trunk toggle",     "frunk open"]),
+    "charge start|stop":        ("Start/stop charging",                           ["charge start",     "charge stop"]),
+    "port open|close":          ("Open/close the charge port",                    ["port open",        "port close"]),
+    "climate on|off":           ("Turn climate on/off",                           ["climate on",       "climate off"]),
+    "defrost on|off":           ("Enable/disable max defrost/preconditioning",    ["defrost on",       "defrost off"]),
+    "steering heat on|off":     ("Steering wheel heater on/off",                  ["steering heat on", "steering heat off"]),
+    "sunroof vent|close":       ("Vent/close the sunroof",                        ["sunroof vent",     "sunroof close"]),
+    "media play|next|prev":     ("Toggle playback / next / prev track",           ["media play",       "media next",  "media prev"]),
+    "media vol up|down":        ("Volume up/down",                                ["media vol up",     "media vol down"]),
+    "speed limit on|off <pin>": ("Activate/deactivate speed limit",               ["speed limit on",   "speed limit off"]),
+    "speed limit set|clear":    ("Set limit mph 50-90 / clear PIN",               ["speed limit set",  "speed limit clear"]),
+    "update start|cancel":      ("Start/cancel pending software update",          ["update start",     "update cancel"]),
+}
+
+# Set of keys that are secondary in an alias group (suppressed in pager/hints)
+_PAGER_ALIAS_SECONDARY: set = {
+    k for _, keys in _PAGER_ALIASES.values() for k in keys[1:]
+}
+
+
+def _build_pager_lines(c: Colors) -> List[str]:
+    """Return ANSI-coloured lines for the command pager, grouped by _PAGER_CATS order."""
+    reg: Dict[str, Tuple[str, str]] = {}
+    for name, ep, _body, helptext in CMD_REGISTRY:
+        key = re.split(r"\s+<", name)[0]
+        reg[key] = (name, helptext)
+
+    lines: List[str] = []
+    lines.append(
+        f"  {c.B}{c.MAG}Known commands {c.R}  "
+        f"{c.GRY}?/Esc/q close  j/k scroll  d/u half-page  g/G top/bottom  /search  n/N match{c.R}"
+    )
+    lines.append("")
+
+    rendered: set = set()
+
+    for cat_label, _ in _PAGER_CATS:
+        cat_keys = [
+            re.split(r"\s+<", name)[0]
+            for name, ep, _, _ in CMD_REGISTRY
+            if _pager_cat(ep) == cat_label
+        ]
+        if not cat_keys:
+            continue
+
+        lines.append("")
+        lines.append(f"  {c.B}{c.MAG}{cat_label}{c.R}")
+
+        for key in cat_keys:
+            if key in rendered:
+                continue
+            alias = next(
+                (disp for disp, (_, keys) in _PAGER_ALIASES.items() if keys[0] == key),
+                None
+            )
+            if alias:
+                parts       = re.split(r"(\s+<[^>]+>)", alias)
+                cmd_vis     = parts[0]
+                arg_hint    = "".join(parts[1:])
+                merged_help = _PAGER_ALIASES[alias][0]
+                lines.append(f"  {c.CYN}{cmd_vis}{c.R}{c.GRY}{arg_hint}{c.R}   {c.GRY}{merged_help}{c.R}")
+                for k in _PAGER_ALIASES[alias][1]:
+                    rendered.add(k)
+            elif key in _PAGER_ALIAS_SECONDARY:
+                rendered.add(key)
+            else:
+                name, helptext = reg[key]
+                parts    = re.split(r"(\s+<[^>]+>)", name)
+                cmd_vis  = parts[0]
+                arg_hint = "".join(parts[1:])
+                lines.append(f"  {c.CYN}{cmd_vis}{c.R}{c.GRY}{arg_hint}{c.R}   {c.GRY}{helptext}{c.R}")
+                rendered.add(key)
+
+    lines.append("")
+    return lines
+
+
+def show_cmd_pager(term: Term, c: Colors) -> None:
+    """Open the command pager."""
+    _pager_builtin(term, c, _build_pager_lines(c), title="Known commands")
+
+
+def _pager_search_prompt(term: Term, c: Colors,
+                         plain_lines: List[str]) -> Tuple[str, List[int]]:
+    """Show / prompt at the bottom; return (pattern, matching_row_indices)."""
+    import select as _sel
+    _, term_h = term.get_size()
+    row = term_h - 1
+    buf: List[str] = []
+
+    def redraw() -> None:
+        term.move(row, 0)
+        term.clear_line()
+        term.write(f"{c.B}/{c.R}{''.join(buf)}")
+
+    term.cursor(True)
+    redraw()
+    while True:
+        try:
+            r, _, _ = _sel.select([sys.stdin], [], [], 60)
+        except Exception:
+            break
+        if not r:
+            break
+        ch = sys.stdin.read(1)
+        if ch in ("\r", "\n"):
+            break
+        if ch == "\x1b":
+            buf = []
+            break
+        if ch in ("\x7f", "\x08"):
+            if buf:
+                buf.pop()
+                redraw()
+            continue
+        if ch.isprintable():
+            buf.append(ch)
+            redraw()
+    term.cursor(False)
+    term.move(row, 0)
+    term.clear_line()
+
+    pat = "".join(buf).strip()
+    if not pat:
+        return ("", [])
+    try:
+        rx = re.compile(pat, re.IGNORECASE)
+    except re.error:
+        rx = re.compile(re.escape(pat), re.IGNORECASE)
+    return (pat, [i for i, ln in enumerate(plain_lines) if rx.search(ln)])
+
+
+def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "") -> None:
+    """Built-in scrollable + searchable pager. Accepts pre-built line list."""
+    import select as _sel
+
+    plain_lines = [strip_ansi(ln) for ln in all_lines]
+
+    scroll_top = 0
+    search_pat = ""
+    match_rows: List[int] = []
+    match_idx  = 0
+
+    def clamp(n: int) -> int:
+        _, term_h = term.get_size()
+        visible = max(1, term_h - 2)
+        return max(0, min(n, max(0, len(all_lines) - visible)))
+
+    def jump_to(idx: int) -> None:
+        nonlocal scroll_top, match_idx
+        if not match_rows:
+            return
+        match_idx  = idx % len(match_rows)
+        scroll_top = clamp(match_rows[match_idx])
+
+    def draw() -> None:
+        _, term_h = term.get_size()
+        visible = max(1, term_h - 2)
+        term.home()
+        term.clear_to_end()
+
+        cur_match_row = match_rows[match_idx % len(match_rows)] if match_rows else -1
+
+        for i in range(visible):
+            idx = scroll_top + i
+            if idx >= len(all_lines):
+                term.write("\n")
+                continue
+            line = all_lines[idx]
+            if search_pat and idx == cur_match_row:
+                line = f"{c.YLW}{c.B}{strip_ansi(line)}{c.R}"
+            elif search_pat:
+                try:
+                    rx   = re.compile(f"({re.escape(search_pat)})", re.IGNORECASE)
+                    line = rx.sub(f"{c.REV}\\1{c.R}", line)
+                except re.error:
+                    pass
+            term.write(line + c.R + "\n")
+
+        term.move(term_h - 2, 0)
+        term.clear_line()
+        total   = len(all_lines)
+        pct     = min(100, int(100 * (scroll_top + visible) / max(1, total)))
+        minfo   = f"  [{match_idx % len(match_rows) + 1}/{len(match_rows)}]" if match_rows else ""
+        patinfo = f"  /{search_pat}" if search_pat else ""
+        bar_title = title or "pager"
+        term.write(
+            f"{c.REV} {bar_title}  {pct}%{patinfo}{minfo}"
+            f"  j/k d/u g/G  /search  n/N  q close {c.R}"
+        )
+        term.move(term_h - 1, 0)
+        term.clear_line()
+
+    draw()
+
+    while True:
+        try:
+            r, _, _ = _sel.select([sys.stdin], [], [], 60)
+        except Exception:
+            break
+        if not r:
+            continue
+
+        ch = sys.stdin.read(1)
+        _, term_h = term.get_size()
+        half = max(1, (term_h - 2) // 2)
+
+        if ch in ("q", "\x1b", "?"):
+            break
+        elif ch == "j":
+            scroll_top = clamp(scroll_top + 1)
+        elif ch == "k":
+            scroll_top = clamp(scroll_top - 1)
+        elif ch == "d":
+            scroll_top = clamp(scroll_top + half)
+        elif ch == "u":
+            scroll_top = clamp(scroll_top - half)
+        elif ch == "g":
+            scroll_top = 0
+        elif ch == "G":
+            scroll_top = clamp(len(all_lines))
+        elif ch == "n" and match_rows:
+            jump_to(match_idx + 1)
+        elif ch == "N" and match_rows:
+            jump_to(match_idx - 1)
+        elif ch == "/":
+            search_pat, match_rows = _pager_search_prompt(term, c, plain_lines)
+            match_idx = 0
+            if match_rows:
+                jump_to(0)
+        else:
+            continue
+
+        draw()
+
+    term.home()
+    term.clear_to_end()
+
+
+def show_log_pager(term: Term, c: Colors) -> None:
+    """Read teslui.log and display it newest-first in the builtin pager."""
+    try:
+        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+            raw_lines = f.readlines()
+    except OSError:
+        raw_lines = []
+
+    entries = [ln.rstrip() for ln in reversed(raw_lines) if ln.strip()]
+
+    all_lines: List[str] = [
+        f"  {c.B}{c.MAG}COMMAND LOG{c.R}  "
+        f"{c.GRY}newest first  q/Esc close  j/k scroll  d/u half-page  g/G top/bottom{c.R}",
+        "",
+    ]
+
+    if not entries:
+        all_lines.append(f"  {c.GRY}(log is empty){c.R}")
     else:
-        col = c.RED
-    blocks = ("█" * filled) + (f"{c.GRY}" + ("░" * empty) if empty else "")
+        for entry in entries:
+            if " - ok" in entry or "✓" in entry:
+                all_lines.append(f"  {c.GRN}{entry}{c.R}")
+            elif any(x in entry for x in (" - X ", "Unknown", "missing", "disabled", "failed")):
+                all_lines.append(f"  {c.RED}{entry}{c.R}")
+            else:
+                all_lines.append(f"  {c.GRY}{entry}{c.R}")
+
+    all_lines.append("")
+    _pager_builtin(term, c, all_lines, title=f"Command log  {len(entries)} entries")
+
+
+# =============================================================================
+#  Render: main dashboard
+# =============================================================================
+
+def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> None:
+    term_w, _ = term.get_size()
+    lbl_w, val_w = 9, 20
+    col_w    = 2 + lbl_w + val_w
+    content_w = min((col_w * 2 + 2), term_w)
+    frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
+
+    dist_u  = "km"  if st.unit == "metric" else "mi"
+    temp_u  = "C"   if st.unit == "metric" else "F"
+    press_u = "bar" if st.unit == "metric" else "psi"
+
+    name   = str(jget(data, "response.vehicle_state.vehicle_name", "Tesla"))
+    model  = str(jget(data, "response.vehicle_config.car_type", "?")).upper()
+    vin    = str(jget(data, "response.vin", "?"))
+    state  = str(jget(data, "response.state", "unknown"))
+    sw     = str(jget(data, "response.vehicle_state.car_version", "?")).split(" ")[0]
+    swua   = str(jget(data, "response.vehicle_state.software_update.status", "unknown"))
+    odo    = int(round(float(jget(data, "response.vehicle_state.odometer", 0) or 0)))
+
+    bat        = int(float(jget(data, "response.charge_state.battery_level", 0) or 0))
+    rng        = int(round(float(jget(data, "response.charge_state.battery_range", 0) or 0)))
+    chg_state  = str(jget(data, "response.charge_state.charging_state", "Disconnected")).lower()
+    chg_limit  = int(float(jget(data, "response.charge_state.charge_limit_soc", 0) or 0))
+    chg_mins   = int(float(jget(data, "response.charge_state.minutes_to_full_charge", 0) or 0))
+    chg_kw     = int(float(jget(data, "response.charge_state.charger_power", 0) or 0))
+    chg_volts  = int(float(jget(data, "response.charge_state.charger_voltage", 0) or 0))
+    chg_current= int(float(jget(data, "response.charge_state.charge_amps", 0) or 0))
+    chg_added  = float(jget(data, "response.charge_state.charge_energy_added", 0) or 0)
+    bat_heat   = bool(jget(data, "response.charge_state.battery_heater_on", False))
+    draw       = int(float(jget(data, "response.drive_state.power", 0) or 0))
+
+    inside    = float(jget(data, "response.climate_state.inside_temp", 0) or 0)
+    outside   = float(jget(data, "response.climate_state.outside_temp", 0) or 0)
+    set_temp  = float(jget(data, "response.climate_state.driver_temp_setting", 0) or 0)
+    climate_on= bool(jget(data, "response.climate_state.is_climate_on", False))
+    defrost   = int(float(jget(data, "response.climate_state.defrost_mode", 0) or 0))
+
+    fl = float(jget(data, "response.vehicle_state.tpms_pressure_fl", 0) or 0)
+    fr = float(jget(data, "response.vehicle_state.tpms_pressure_fr", 0) or 0)
+    rl = float(jget(data, "response.vehicle_state.tpms_pressure_rl", 0) or 0)
+    rr = float(jget(data, "response.vehicle_state.tpms_pressure_rr", 0) or 0)
+
+    locked     = bool(jget(data, "response.vehicle_state.locked", False))
+    sentry     = bool(jget(data, "response.vehicle_state.sentry_mode", False))
+    valet      = bool(jget(data, "response.vehicle_state.valet_mode", False))
+    doors_open = sum(1 for k in ("df", "pf", "dr", "pr")
+                     if int(jget(data, f"response.vehicle_state.{k}", 0) or 0) > 0)
+
+    if st.unit == "metric":
+        odo = miles_to_km(odo)
+        rng = miles_to_km(rng)
+    else:
+        inside   = c_to_f(inside)
+        outside  = c_to_f(outside)
+        set_temp = c_to_f(set_temp)
+        fl = bar_to_psi(fl); fr = bar_to_psi(fr)
+        rl = bar_to_psi(rl); rr = bar_to_psi(rr)
+
+    sc = c.GRN
+    if state in ("asleep", "offline"): sc = c.GRY
+    if state == "charging":            sc = c.YLW
+
+    bat_bar = make_bat_bar(c, bat)
+
+    cs_c = c.GRY
+    if chg_state == "charging": cs_c = c.YLW
+    if chg_state == "complete": cs_c = c.GRN
+
+    clm_c, clm_l = (c.GRN, "on") if climate_on else (c.GRY, "off")
+
+    def_c, def_l = c.GRY, "off"
+    if defrost == 1: def_c, def_l = c.YLW, "on"
+    elif defrost == 2: def_c, def_l = c.RED, "max"
+
+    bat_c, bat_l = (c.GRN, "on") if bat_heat else (c.GRY, "off")
+
+    dra_c = c.GRY
+    if draw > 0:       dra_c = c.R
+    if 1 < draw <= 2:  dra_c = c.YLW
+    if draw > 2:       dra_c = c.RED
+
+    lk_c, lk_l = (c.GRN, "locked")   if locked else (c.RED, "unlocked")
+    sn_c, sn_l = (c.GRN, "active")   if sentry else (c.GRY, "off")
+    dr_c, dr_l = (c.RED, f"{doors_open} open") if doors_open > 0 else (c.GRN, "closed")
+    vl_c, vl_l = (c.GRN, "on")       if valet  else (c.GRY, "off")
+
+    mode_c = c.GRN if st.mode in ("mtm", "vc") else c.GRY
+
+    px_bat = "\u26a1 " if c.fancy else ""
+    px_clm = "\U0001f321 " if c.fancy else ""
+    px_drv = "\U0001f697 " if c.fancy else ""
+    px_sec = "\U0001f6e1 " if c.fancy else ""
+
+    frame.blank()
+    frame.cat_labels = False
+
+    ts = _dt.datetime.now().strftime("%b %d, %H:%M")
+    frame.row2(c,
+        f"{c.B}{c.R}{name} {model}{c.R}, {odo} {dist_u}", "",
+        f"{sc}{state}{c.R}", f"{c.GRY}[{mode_c}{st.mode}{c.R}{c.GRY}]{c.R}")
+    upd = f"{c.BLU}+{c.R}" if swua == "available" else ""
+    frame.row2(c, f"{c.GRY}[{vin}]{c.R}", f"{c.GRY}v{sw}{c.R}{upd}",
+               f"{c.GRY}{ts}{c.R}", "")
+
+    frame.section(c, two_col_title(content_w, f"{px_bat}ENERGY", f"{px_clm}THERMAL",
+                                   shift_left=(1 if c.fancy else 0)))
+    frame.cat_labels = True
+
+    added = f"{c.GRN}+{chg_added:g} kWh{c.R}" if chg_state != "disconnected" else ""
+    frame.row2(c, "Battery", bat_bar,                        "Outside", f"{outside}{temp_u}")
+    frame.row2(c, "Range",   f"{rng} {dist_u}",              "Inside",  f"{inside}{temp_u}")
+    frame.row2(c, "Draw",    f"{dra_c}{draw} kW{c.R}",       "Target",  f"{set_temp}{temp_u}")
+    frame.row2(c, "Charge",  f"{cs_c}{chg_state}{c.R} {added}", "Control", f"{clm_c}{clm_l}{c.R}")
+    frame.row2(c, "Limit",   f"{chg_limit}%",                "Defrost", f"{def_c}{def_l}{c.R}")
+    if chg_state != "disconnected":
+        frame.row2(c, "Power",  f"{c.YLW}{chg_kw} kW ({chg_volts} V, {chg_current} A){c.R}",
+                      "Battery", "")
+        frame.row2(c, "End in", fmt_time_hhmm(chg_mins), " heater", f"{bat_c}{bat_l}{c.R}")
+
+    frame.section(c, two_col_title(content_w, f"{px_drv}WHEELS", f"{px_sec}PARKING",
+                                   shift_left=(1 if c.fancy else 0)))
+    def tyre(v: float) -> str:
+        return f"{v:.2f} {press_u}" if st.unit == "metric" else f"{int(v)} {press_u}"
+    frame.row2(c, "F left",  tyre(fl), "Status", f"{lk_c}{lk_l}{c.R}")
+    frame.row2(c, "F right", tyre(fr), "Panels", f"{dr_c}{dr_l}{c.R}")
+    frame.row2(c, "R left",  tyre(rl), "Sentry", f"{sn_c}{sn_l}{c.R}")
+    frame.row2(c, "R right", tyre(rr), "Valet",  f"{vl_c}{vl_l}{c.R}")
+
+    frame.blank()
+    frame.cat_labels = False
+    frame.row1(c, st.cmd_msg if st.cmd_msg else f"{c.GRY}h help{c.R}", "")
+
+    w_local       = min(frame.maxvis, term_w)
+    st.prompt_col = max(0, (term_w - w_local) // 2) + 2 + 9 + 1   # margin + indent + lbl_w + space
+    st.prompt_row = flush_frame(term, c, frame)
+    st.cmd_msg = ""
+
+
+# =============================================================================
+#  Helpers
+# =============================================================================
+
+def make_bat_bar(c: Colors, pct: int, width: int = 12) -> str:
+    pct    = clamp_int(int(pct), 0, 100)
+    filled = (pct * width) // 100
+    empty  = width - filled
+    col    = c.GRN if pct >= 70 else (c.YLW if pct >= 30 else c.RED)
+    blocks = ("\u2588" * filled) + (f"{c.GRY}" + ("\u2591" * empty) if empty else "")
     return f"{col}{blocks}{col}{c.R} {col}{pct}%{c.R}"
 
 
@@ -464,295 +1330,33 @@ def bar_to_psi(bar: float) -> int:
     return int(round(bar * 14.5037738))
 
 
-@dataclasses.dataclass
-class State:
-    mode: str = "ro"          # ro|mtm|vc
-    unit: str = "metric"      # metric|us
-    refresh_interval: int = 5
-    show_help: bool = False
-    cmd_msg: str = ""
-    target_vin: str = ""
-    myteslamate_token: str = ""
-    vehicle_command_url: str = "https://localhost:4443"
-    vehicle_command_cert: str = "cert.pem"
+# =============================================================================
+#  Key handling
+# =============================================================================
 
-
-def render_help(term: Term, c: Colors, st: State) -> None:
-    term_w, _ = term.get_size()
-
-    # Match main screen column geometry exactly
-    lbl_w, val_w = 9, 20
-    col_w = 2 + lbl_w + val_w
-    content_w = min((col_w * 2 + 2), term_w)
-
-    frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
-    frame.blank()
-
-    def kcap(k: str, desc: str) -> str:
-        return f"{c.REV} {k:<1} {c.R} {desc}"
-
-    frame.section(c, "TESLUI")
-    frame.row2(c, kcap("m", "mode"), "", kcap("u", "units"), "")
-    frame.row2(c, kcap("r", "refresh"), "", kcap("s", "style"), "")
-    frame.row2(c, kcap("-", "refresh -5s"), "", kcap("i", "invert"), "")
-    frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
-    frame.row1(c, kcap("q", "quit"), "")
-
-    # --- Build COMMANDS section in a separate frame using the SAME formatting ---
-    # This lets us:
-    #  - keep COMMANDS hidden in ro (like bash)
-    #  - still stabilize centering (no jump) by taking cmd_frame.maxvis into account
-    cmd_frame = Frame(term_w=term_w, content_w=frame.content_w, lbl_w=frame.lbl_w, val_w=frame.val_w)
-    cmd_frame.section(c, "COMMANDS")
-    cmd_frame.row2(c, kcap("h", "honk"), "", kcap("f", "flash lights"), "")
-    cmd_frame.row2(c, kcap("L", "unlock"), "", kcap("o", "open port"), "")
-    cmd_frame.row2(c, kcap("l", "lock"), "", kcap("p", "charge start"), "")
-    cmd_frame.row2(c, kcap("C", "climate on"), "", kcap("P", "charge stop"), "")
-    cmd_frame.row2(c, kcap("c", "climate off"), "", kcap(":", "enter command"), "")
-
-    # Stabilize centering width even when COMMANDS is hidden
-    frame.maxvis = max(frame.maxvis, cmd_frame.maxvis)
-
-    # Match bash: only show COMMANDS when not in ro
-    if st.mode != "ro":
-        for s in cmd_frame.lines:
-            frame.fline(s)
-
-    frame.blank()
-    frame.row2(
-        c,
-        "mode:", f"{c.GRY}{st.mode}{c.R}",
-        "style:", f"{c.GRY}{'fancy' if c.fancy else 'minimal'}{c.R}",
-    )
-    frame.row2(
-        c,
-        "refresh:", f"{c.GRY}{st.refresh_interval}s{c.R}",
-        "colors:", f"{c.GRY}{'inv' if c.inverted else 'normal'}{'/bw' if c.bw else '/col'}{c.R}",
-    )
-    frame.blank()
-    frame.row1(c, f"{c.GRY}? close help{c.R}", "")
-
-    flush_frame(term, c, frame)
-    
-
-def run_cmd(client: TeslaClient, st: State, ep: str, label: str, c: Colors) -> str:
-    if st.mode == "ro":
-        return f"? help    {c.RED}✗ commands disabled in ro (press m){c.R}"
-
-    try:
-        if st.mode == "mtm":
-            if not st.target_vin:
-                return f"? help    {c.RED}✗ TESLA_VIN missing (could not auto-detect){c.R}"
-            url = (
-                f"https://api.myteslamate.com/api/1/vehicles/{urllib.parse.quote(st.target_vin)}/command/{ep}"
-                f"?token={urllib.parse.quote(st.myteslamate_token)}"
-            )
-            resp = client.api_post(url)
-        elif st.mode == "vc":
-            if not st.target_vin:
-                return f"? help    {c.RED}✗ TESLA_VIN required for vc{c.R}"
-            cafile = st.vehicle_command_cert or "cert.pem"
-            ctx = ssl.create_default_context(cafile=cafile)
-            base = st.vehicle_command_url.rstrip("/")
-            url = f"{base}/api/1/vehicles/{urllib.parse.quote(st.target_vin)}/command/{ep}"
-            resp = client.api_post(url, ctx=ctx)
-        else:
-            return f"? help    {c.RED}✗ unknown mode{c.R}"
-    except Exception as e:
-        return f"? help    {c.RED}✗ {str(e)[:80]}{c.R}"
-
-    ok = bool(jget(resp, "response.result", False))
-    reason = str(jget(resp, "response.reason", "") or jget(resp, "error", "") or "failed")
-    return (f"{c.GRN}✓ {label}{c.R}") if ok else (f"? help    {c.RED}✗ {reason}{c.R}")
-
-
-def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> None:
-    term_w, _ = term.get_size()
-    lbl_w, val_w = 9, 20
-    col_w = 2 + lbl_w + val_w
-    content_w = min((col_w * 2 + 2), term_w)
-    frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
-
-    dist_u = "km" if st.unit == "metric" else "mi"
-    temp_u = "°C" if st.unit == "metric" else "°F"
-    press_u = "bar" if st.unit == "metric" else "psi"
-
-    name = str(jget(data, "response.vehicle_state.vehicle_name", "Tesla"))
-    model = str(jget(data, "response.vehicle_config.car_type", "?")).upper()
-    vin = str(jget(data, "response.vin", "?"))
-    state = str(jget(data, "response.state", "unknown"))
-    sw = str(jget(data, "response.vehicle_state.car_version", "?")).split(" ")[0]
-    swua = str(jget(data, "response.vehicle_state.software_update.status", "unknown"))
-    odo = int(round(float(jget(data, "response.vehicle_state.odometer", 0) or 0)))
-
-    bat = int(float(jget(data, "response.charge_state.battery_level", 0) or 0))
-    rng = int(round(float(jget(data, "response.charge_state.battery_range", 0) or 0)))
-    chg_state = str(jget(data, "response.charge_state.charging_state", "Disconnected")).lower()
-    chg_limit = int(float(jget(data, "response.charge_state.charge_limit_soc", 0) or 0))
-    chg_mins = int(float(jget(data, "response.charge_state.minutes_to_full_charge", 0) or 0))
-    chg_kw = int(float(jget(data, "response.charge_state.charger_power", 0) or 0))
-    chg_volts = int(float(jget(data, "response.charge_state.charger_voltage", 0) or 0))
-    chg_current = int(float(jget(data, "response.charge_state.charge_actual_current", 0) or 0))
-    chg_added = float(jget(data, "response.charge_state.charge_energy_added", 0) or 0)
-    bat_heat = bool(jget(data, "response.charge_state.battery_heater_on", False))
-    draw = int(float(jget(data, "response.drive_state.power", 0) or 0))
-
-    inside = float(jget(data, "response.climate_state.inside_temp", 0) or 0)
-    outside = float(jget(data, "response.climate_state.outside_temp", 0) or 0)
-    set_temp = float(jget(data, "response.climate_state.driver_temp_setting", 0) or 0)
-    climate_on = bool(jget(data, "response.climate_state.is_climate_on", False))
-    defrost = int(float(jget(data, "response.climate_state.defrost_mode", 0) or 0))
-
-    fl = float(jget(data, "response.vehicle_state.tpms_pressure_fl", 0) or 0)
-    fr = float(jget(data, "response.vehicle_state.tpms_pressure_fr", 0) or 0)
-    rl = float(jget(data, "response.vehicle_state.tpms_pressure_rl", 0) or 0)
-    rr = float(jget(data, "response.vehicle_state.tpms_pressure_rr", 0) or 0)
-
-    locked = bool(jget(data, "response.vehicle_state.locked", False))
-    sentry = bool(jget(data, "response.vehicle_state.sentry_mode", False))
-    valet = bool(jget(data, "response.vehicle_state.valet_mode", False))
-    doors_open = sum(1 for k in ("df", "pf", "dr", "pr") if int(jget(data, f"response.vehicle_state.{k}", 0) or 0) > 0)
-
-    if st.unit == "metric":
-        odo = miles_to_km(odo)
-        rng = miles_to_km(rng)
-    else:
-        inside = c_to_f(inside)
-        outside = c_to_f(outside)
-        set_temp = c_to_f(set_temp)
-        fl = bar_to_psi(fl)
-        fr = bar_to_psi(fr)
-        rl = bar_to_psi(rl)
-        rr = bar_to_psi(rr)
-
-    sc = c.GRN
-    if state in ("asleep", "offline"):
-        sc = c.GRY
-    if state == "charging":
-        sc = c.YLW
-
-    bat_bar = make_bat_bar(c, bat)
-
-    cs_c = c.GRY
-    if chg_state == "charging":
-        cs_c = c.YLW
-    if chg_state == "complete":
-        cs_c = c.GRN
-
-    clm_c, clm_l = (c.GRN, "on") if climate_on else (c.GRY, "off")
-
-    def_c, def_l = c.GRY, "off"
-    if defrost == 1:
-        def_c, def_l = c.YLW, "on"
-    elif defrost == 2:
-        def_c, def_l = c.RED, "max"
-
-    bat_c, bat_l = (c.GRN, "on") if bat_heat else (c.GRY, "off")
-
-    dra_c = c.GRY
-    if draw > 0:
-        dra_c = c.R
-    if 1 < draw <= 2:
-        dra_c = c.YLW
-    if draw > 2:
-        dra_c = c.RED
-
-    lk_c, lk_l = (c.GRN, "locked") if locked else (c.RED, "unlocked")
-    sn_c, sn_l = (c.GRN, "active") if sentry else (c.GRY, "off")
-    dr_c, dr_l = (c.RED, f"{doors_open} open") if doors_open > 0 else (c.GRN, "closed")
-    vl_c, vl_l = (c.GRN, "on") if valet else (c.GRY, "off")
-
-    mode_c = c.GRN if st.mode in ("mtm", "vc") else c.GRY
-
-    px_bat = "⚡ " if c.fancy else ""
-    px_clm = "🌡 " if c.fancy else ""
-    px_drv = "🚗 " if c.fancy else ""
-    px_sec = "🛡 " if c.fancy else ""
-
-    frame.blank()
-    frame.cat_labels = False
-
-    ts = _dt.datetime.now().strftime("%b %d, %H:%M")
-    frame.row2(
-        c,
-        f"{c.B}{c.R}{name} {model}{c.R}, {odo} {dist_u}",
-        "",
-        f"{sc}{state}{c.R}",
-        f"{c.GRY}[{mode_c}{st.mode}{c.R}{c.GRY}]{c.R}",
-    )
-    upd = f"{c.BLU}⁺{c.R}" if swua == "available" else ""
-    frame.row2(c, f"{c.GRY}[{vin}]{c.R}", f"{c.GRY}v{sw}{c.R}{upd}", f"{c.GRY}{ts}{c.R}", "")
-
-    # icons add 2 visible chars ("⚡ "), so shift right title left in fancy mode
-    frame.section(c, two_col_title(content_w, f"{px_bat}ENERGY", f"{px_clm}THERMAL",
-                                  shift_left=(1 if c.fancy else 0)))
-    frame.cat_labels = True
-
-    added = f"{c.GRN}+{chg_added:g} kWh{c.R}" if chg_state != "disconnected" else ""
-    frame.row2(c, "Battery", bat_bar, "Outside", f"{outside}{temp_u}")
-    frame.row2(c, "Range", f"{rng} {dist_u}", "Inside", f"{inside}{temp_u}")
-    frame.row2(c, "Draw", f"{dra_c}{draw} kW{c.R}", "Target", f"{set_temp}{temp_u}")
-    frame.row2(c, "Charge", f"{cs_c}{chg_state}{c.R} {added}", "Control", f"{clm_c}{clm_l}{c.R}")
-    frame.row2(c, "Limit", f"{chg_limit}%", "Defrost", f"{def_c}{def_l}{c.R}")
-    if chg_state != "disconnected":
-        frame.row2(c, "Power", f"{c.YLW}{chg_kw} kW ({chg_volts} V, {chg_current} A){c.R}", "Battery", "")
-        frame.row2(c, "End in", fmt_time_hhmm(chg_mins), " heater", f"{bat_c}{bat_l}{c.R}")
-
-    # icons add 2 visible chars ("⚡ "), so shift right title left in fancy mode
-    frame.section(c, two_col_title(content_w, f"{px_drv}WHEELS", f"{px_sec}PARKING",
-                                  shift_left=(1 if c.fancy else 0)))
-    frame.row2(c, "F left", f"{fl:.2f} {press_u}" if st.unit == "metric" else f"{int(fl)} {press_u}", "Status", f"{lk_c}{lk_l}{c.R}")
-    frame.row2(c, "F right", f"{fr:.2f} {press_u}" if st.unit == "metric" else f"{int(fr)} {press_u}", "Panels", f"{dr_c}{dr_l}{c.R}")
-    frame.row2(c, "R left", f"{rl:.2f} {press_u}" if st.unit == "metric" else f"{int(rl)} {press_u}", "Sentry", f"{sn_c}{sn_l}{c.R}")
-    frame.row2(c, "R right", f"{rr:.2f} {press_u}" if st.unit == "metric" else f"{int(rr)} {press_u}", "Valet", f"{vl_c}{vl_l}{c.R}")
-
-    frame.blank()
-    frame.cat_labels = False
-    frame.row1(c, st.cmd_msg if st.cmd_msg else f"{c.GRY}? help{c.R}", "")
-
-    flush_frame(term, c, frame)
-    st.cmd_msg = ""
-
-
-def prompt_command(term: Term, c: Colors) -> str:
-    _, term_h = term.get_size()
-    row = max(0, term_h - 2)
-    term.move(row, 0)
-    term.clear_line()
-    term.write(f"{c.B}:{c.R} ")
-    term.cursor(True)
-
-    was_windows = (os.name == "nt")
-    if not was_windows:
-        term.disable_raw()
-
-    try:
-        line = sys.stdin.readline()
-    finally:
-        if not was_windows:
-            term.enable_raw()
-        term.cursor(False)
-        term.move(row, 0)
-        term.clear_line()
-
-    line = (line or "").rstrip("\r\n")
-    if line == "\x1b":
-        return ""
-    return line
-
-
-def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient], vid: str, key: Optional[str]) -> bool:
-    """
-    returns True if caller should fetch fresh data; False otherwise.
-    """
+def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
+               vid: str, key: Optional[str]) -> bool:
+    """Returns True if the caller should fetch fresh vehicle data."""
     if key is None:
-        return True  # timeout => refresh
+        return True                         # timeout -> refresh
 
     if key in ("q", "Q"):
         raise KeyboardInterrupt
 
+    # h = help (was ?)
+    if key == "h":
+        st.show_help      = not st.show_help
+        st.show_cmd_pager = False
+        return False
+
+    # ? = full command pager -- runs inline (blocks until user quits)
     if key == "?":
-        st.show_help = not st.show_help
+        show_cmd_pager(term, c)
+        return False
+
+    # z = log pager -- runs inline (blocks until user quits)
+    if key == "z":
+        show_log_pager(term, c)
         return False
 
     if key == "i":
@@ -778,7 +1382,8 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient], 
         return False
 
     if key == "r":
-        st.show_help = False
+        st.show_help      = False
+        st.show_cmd_pager = False
         return True
 
     if key == "+":
@@ -793,70 +1398,57 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient], 
             st.refresh_interval = 1
         return False
 
-    # Always recognize command keys, even if commands are currently unavailable
-    cmd_keys = {"h", "f", "L", "l", "C", "c", "p", "P", "o", ":"}
-    if (not st.show_help) and (key in cmd_keys):
+    # Command hotkeys -- only when neither overlay is open
+    cmd_keys = {"H", "f", "L", "l", "C", "c", "p", "P", "o", ":"}
+    if (not st.show_help) and (not st.show_cmd_pager) and (key in cmd_keys):
         if client is None:
-            # demo mode (no token) => explicit feedback instead of "nothing happens"
-            st.cmd_msg = f"? help    {c.RED}✗ commands unavailable (no TESLA_REFRESH_TOKEN){c.R}"
+            st.cmd_msg = f"h help    {c.RED}X commands unavailable (no TESLA_REFRESH_TOKEN){c.R}"
+            log_cmd(key, st.cmd_msg)
             return False
         if st.mode == "ro":
-            st.cmd_msg = f"? help    {c.RED}✗ commands disabled in ro (press m){c.R}"
+            st.cmd_msg = f"h help    {c.RED}X commands disabled in ro (press m){c.R}"
+            log_cmd(key, st.cmd_msg)
             return False
 
-        if key == "h":
-            st.cmd_msg = run_cmd(client, st, "honk_horn", "NOOT NOOT!", c)
+        if key == "H":
+            st.cmd_msg = run_cmd(client, st, "honk_horn",              "NOOT NOOT!",      None, c)
         elif key == "f":
-            st.cmd_msg = run_cmd(client, st, "flash_lights", "Lights flashed", c)
+            st.cmd_msg = run_cmd(client, st, "flash_lights",            "Lights flashed",  None, c)
         elif key == "L":
-            st.cmd_msg = run_cmd(client, st, "door_unlock", "Unlocked", c)
+            st.cmd_msg = run_cmd(client, st, "door_unlock",             "Unlocked",        None, c)
         elif key == "l":
-            st.cmd_msg = run_cmd(client, st, "door_lock", "Locked", c)
+            st.cmd_msg = run_cmd(client, st, "door_lock",               "Locked",          None, c)
         elif key == "C":
-            st.cmd_msg = run_cmd(client, st, "auto_conditioning_start", "Climate on", c)
+            st.cmd_msg = run_cmd(client, st, "auto_conditioning_start", "Climate on",      None, c)
         elif key == "c":
-            st.cmd_msg = run_cmd(client, st, "auto_conditioning_stop", "Climate off", c)
+            st.cmd_msg = run_cmd(client, st, "auto_conditioning_stop",  "Climate off",     None, c)
         elif key == "p":
-            st.cmd_msg = run_cmd(client, st, "charge_start", "Charging started", c)
+            st.cmd_msg = run_cmd(client, st, "charge_start",            "Charging started",None, c)
         elif key == "P":
-            st.cmd_msg = run_cmd(client, st, "charge_stop", "Charging stopped", c)
+            st.cmd_msg = run_cmd(client, st, "charge_stop",             "Charging stopped",None, c)
         elif key == "o":
-            st.cmd_msg = run_cmd(client, st, "charge_port_door_open", "Port opened", c)
+            st.cmd_msg = run_cmd(client, st, "charge_port_door_open",   "Port opened",     None, c)
         elif key == ":":
-            cmd = prompt_command(term, c)
-            cmd_map = {
-                "honk": ("honk_horn", "NOOT NOOT!"),
-                "flash": ("flash_lights", "Lights flashed"),
-                "lock": ("door_lock", "Locked"),
-                "unlock": ("door_unlock", "Unlocked"),
-                "climate on": ("auto_conditioning_start", "Climate on"),
-                "climate off": ("auto_conditioning_stop", "Climate off"),
-                "charge on": ("charge_start", "Charging started"),
-                "charge off": ("charge_stop", "Charging stopped"),
-                "port open": ("charge_port_door_open", "Port opened"),
-                "port close": ("charge_port_door_close", "Port closed"),
-            }
-            if cmd == "":
-                pass
-            elif cmd in cmd_map:
-                ep, label = cmd_map[cmd]
-                st.cmd_msg = run_cmd(client, st, ep, label, c)
-            else:
-                st.cmd_msg = f"? help    {c.RED}Unknown command: {cmd}{c.R}"
+            st.cmd_msg = parse_and_run_cmd(term, c, client, st)
 
-        return True  # force immediate refresh after any command
-    
+        return True                         # force immediate refresh after any command
+
     return False
 
 
+# =============================================================================
+#  Main
+# =============================================================================
+
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=True)
-    ap.add_argument("-m", "--mode", default="ro", choices=["ro", "mtm", "vc"])
-    ap.add_argument("-u", "--unit", default="metric", choices=["metric", "us"])
-    ap.add_argument("-r", "--refresh", type=int, default=5, metavar="SECONDS", help="Refresh interval in s (default: 5)")
-    ap.add_argument("-i", "--invert", action="store_true")
-    ap.add_argument("-s", "--simple", action="store_true", help="Disable fancy style")
-    ap.add_argument("-b", "--bw", action="store_true", help="Disable colors")
+    ap.add_argument("-m", "--mode",    default="ro",     choices=["ro", "mtm", "vc"])
+    ap.add_argument("-u", "--unit",    default="metric", choices=["metric", "us"])
+    ap.add_argument("-r", "--refresh", type=int, default=5, metavar="SECONDS",
+                    help="Refresh interval in s (default: 5)")
+    ap.add_argument("-i", "--invert",  action="store_true")
+    ap.add_argument("-s", "--simple",  action="store_true", help="Disable fancy style")
+    ap.add_argument("-b", "--bw",      action="store_true", help="Disable colors")
     args = ap.parse_args()
 
     st = State(
@@ -872,9 +1464,9 @@ def main() -> int:
     refresh_token = os.environ.get("TESLA_REFRESH_TOKEN", "") or ""
     c = Colors(fancy=(not args.simple), inverted=bool(args.invert), bw=bool(args.bw))
 
-    term = Term()
+    term   = Term()
     client: Optional[TeslaClient] = None
-    vid = ""
+    vid    = ""
 
     term.alt_screen(True)
     term.cursor(False)
@@ -882,22 +1474,14 @@ def main() -> int:
     term.enable_raw()
 
     def cleanup() -> None:
-        try:
-            term.disable_raw()
-        except Exception:
-            pass
-        try:
-            term.cursor(True)
-        except Exception:
-            pass
-        try:
-            term.invert_screen(False)
-        except Exception:
-            pass
-        try:
-            term.alt_screen(False)
-        except Exception:
-            pass
+        for fn in (
+            lambda: term.disable_raw(),
+            lambda: term.cursor(True),
+            lambda: term.invert_screen(False),
+            lambda: term.alt_screen(False),
+        ):
+            try: fn()
+            except Exception: pass
 
     try:
         # DEMO MODE
@@ -905,12 +1489,13 @@ def main() -> int:
             while True:
                 if st.show_help:
                     render_help(term, c, st)
+                elif st.show_cmd_pager:
+                    render_dashboard(term, c, st, {"response": DEMO_DATA["response"]})
+                    st.show_cmd_pager = False
                 else:
                     render_dashboard(term, c, st, {"response": DEMO_DATA["response"]})
-
                 key = term.read_key_timeout(st.refresh_interval)
-                _ = handle_key(term, c, st, None, "", key)
-            # unreachable
+                _   = handle_key(term, c, st, None, "", key)
 
         # LIVE MODE
         client = TeslaClient(refresh_token)
@@ -920,54 +1505,83 @@ def main() -> int:
         term.write("Looking up vehicle…\n")
         vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
 
-        # If TESLA_VIN wasn't provided, auto-fill it from /products so commands can work.
         if not st.target_vin and vin:
             st.target_vin = vin
 
         term.write(f"Connected: {st.target_vin or '?VIN?'} (vid {vid}) [{st.mode}]\n")
         if not vid:
-            die("No vehicle found — check TESLA_VIN or token")
-            
+            die("No vehicle found. Check TESLA_VIN or token.")
+
         time.sleep(0.5)
 
         data: Optional[Dict[str, Any]] = None
+        _wake_attempt = 0   # counts consecutive failed wake cycles
 
         while True:
+            # ── Try a quick data fetch first (car may already be awake) ──
             try:
                 data = client.get_vehicle_data(vid)
             except Exception:
                 data = None
 
             if not data:
-                try:
-                    term.home(); term.clear_to_end()
-                    term.write(f"{c.YLW}waking vehicle…{c.R}\n")
-                    client.wake_up(vid)
-                except Exception:
-                    pass
+                _wake_attempt += 1
+                term.home(); term.clear_to_end()
 
-                for i in range(12):
+                # Refresh the access token in case it expired while asleep
+                try:
+                    client.refresh_access_token()
+                except Exception as e:
+                    term.write(f"{c.YLW}Token refresh failed: {e!s:.60}  retrying…{c.R}\n")
+                    time.sleep(5)
+                    continue
+
+                # Send wake command (best-effort; car may already be waking)
+                try:
+                    term.write(f"{c.YLW}Waking vehicle (attempt {_wake_attempt})…{c.R}\n")
+                    client.wake_up(vid)
+                except Exception as e:
+                    term.write(f"{c.YLW}Wake request failed: {e!s:.60}{c.R}\n")
+                    # Don't give up — network may still be coming up; keep polling
+
+                # Poll for up to 60 s (20 × 3 s) before declaring this cycle failed
+                for i in range(20):
                     time.sleep(3)
+                    term.home(); term.clear_to_end()
+                    term.write(
+                        f"{c.YLW}Waiting for vehicle"
+                        f" (cycle {_wake_attempt}, {(i+1)*3}s)…{c.R}\n"
+                    )
                     try:
                         data = client.get_vehicle_data(vid)
                         if data:
                             break
                     except Exception:
-                        data = None
-                    term.home(); term.clear_to_end()
-                    term.write(f"{c.YLW}waking… ({i+1}/12){c.R}\n")
+                        pass
 
             if not data:
-                time.sleep(2)
+                # Exponential-ish backoff between wake cycles, capped at 30 s
+                backoff = min(30, 5 * _wake_attempt)
+                term.home(); term.clear_to_end()
+                term.write(
+                    f"{c.YLW}Vehicle unreachable after cycle {_wake_attempt}."
+                    f" Retrying in {backoff}s…{c.R}\n"
+                )
+                time.sleep(backoff)
                 continue
+
+            _wake_attempt = 0   # reset on successful data fetch
 
             while True:
                 if st.show_help:
                     render_help(term, c, st)
+                elif st.show_cmd_pager:
+                    render_dashboard(term, c, st, data)
+                    st.show_cmd_pager = False
                 else:
                     render_dashboard(term, c, st, data)
 
-                key = term.read_key_timeout(st.refresh_interval)
+                key       = term.read_key_timeout(st.refresh_interval)
                 fetch_now = handle_key(term, c, st, client, vid, key)
                 if fetch_now:
                     break
