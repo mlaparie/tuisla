@@ -520,13 +520,14 @@ class TeslaClient:
 #  Logging
 # =============================================================================
 
-LOG_FILE = "teslui.log"
+LOG_FILE = os.path.splitext(os.path.abspath(__file__))[0] + ".log"
 
 
 def log_cmd(ep: str, result: str) -> None:
     ts    = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     entry = f"{ts} - {ep} - {strip_ansi(result)}\n"
     try:
+        # Create the file if it doesn't exist, then append
         with open(LOG_FILE, "a", encoding="utf-8") as f:
             f.write(entry)
     except OSError:
@@ -540,19 +541,22 @@ def log_cmd(ep: str, result: str) -> None:
 def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
             body: Optional[Dict[str, Any]], c: Colors) -> str:
     if st.mode == "ro":
-        result = f"h help    {c.RED}X commands disabled in ro (press m){c.R}"
-        log_cmd(ep, result)
+        msg    = "X commands disabled in ro mode (press m)"
+        result = f"h help    {c.RED}{msg}{c.R}"
+        log_cmd(ep, msg)
         return result
 
     try:
         if st.mode == "mtm":
             if not st.target_vin:
-                result = f"h help    {c.RED}X TESLA_VIN missing{c.R}"
-                log_cmd(ep, result)
+                msg    = "X TESLA_VIN missing"
+                result = f"h help    {c.RED}{msg}{c.R}"
+                log_cmd(ep, msg)
                 return result
             if not st.myteslamate_token:
-                result = f"h help    {c.RED}X MYTESLAMATE_TOKEN missing{c.R}"
-                log_cmd(ep, result)
+                msg    = "X MYTESLAMATE_TOKEN missing"
+                result = f"h help    {c.RED}{msg}{c.R}"
+                log_cmd(ep, msg)
                 return result
             url  = (
                 f"https://api.myteslamate.com/api/1/vehicles"
@@ -562,8 +566,9 @@ def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
             resp = client.api_post(url, body)
         elif st.mode == "vc":
             if not st.target_vin:
-                result = f"h help    {c.RED}X TESLA_VIN required for vc{c.R}"
-                log_cmd(ep, result)
+                msg    = "X TESLA_VIN required for vc"
+                result = "h help    {c.RED}{msg}{c.R}"
+                log_cmd(ep, msg)
                 return result
             cafile = st.vehicle_command_cert or "cert.pem"
             ctx    = ssl.create_default_context(cafile=cafile)
@@ -571,14 +576,16 @@ def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
             url    = f"{base}/api/1/vehicles/{urllib.parse.quote(st.target_vin)}/command/{ep}"
             resp   = client.api_post(url, body, ctx=ctx)
     except Exception as e:
-        result = f"h help    {c.RED}X {str(e)[:80]}{c.R}"
-        log_cmd(ep, result)
+        msg    = f"X {str(e)[:180]}"
+        result = f"h help    {c.RED}{msg}{c.R}"
+        log_cmd(ep, msg)
         return result
 
     ok     = bool(jget(resp, "response.result", False))
     reason = str(jget(resp, "response.reason", "") or jget(resp, "error", "") or "failed")
-    result = (f"h help    {c.GRN}✓ {label}{c.R}") if ok else (f"h help    {c.RED}X {reason}{c.R}")
-    log_cmd(ep, result)
+    msg    = (f"✓ {label}") if ok else (f"X {reason}")
+    result = f"h help    {c.GRN if ok else c.RED}{msg}{c.R}"
+    log_cmd(ep, msg)
     return result
 
 
@@ -594,7 +601,7 @@ def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
 # =============================================================================
 
 def prompt_command(term: Term, c: Colors, st: "State") -> Optional[str]:
-    """Returns the typed string, or None if cancelled (Esc / idle timeout)."""
+    """Returns the typed string, or None if cancelled (Esc/idle timeout)."""
     term_w, term_h = term.get_size()
     lbl_w   = 9
     col_w   = 2 + lbl_w + 20
@@ -691,7 +698,7 @@ def prompt_command(term: Term, c: Colors, st: "State") -> Optional[str]:
                         tok = token + "  "
                         if len(out_lines[-1]) + len(tok) > line_w:
                             if len(out_lines) >= 4:
-                                out_lines[-1] = out_lines[-1].rstrip() + "  (+more)"
+                                out_lines[-1] = out_lines[-1].rstrip() + "  (+ more)"
                                 break
                             out_lines.append("")
                         out_lines[-1] += tok
@@ -773,7 +780,7 @@ def parse_and_run_cmd(term: Term, c: Colors, client: TeslaClient,
             if body.get("passenger_temp") == 0 and body["driver_temp"] != 0:
                 body["passenger_temp"] = body["driver_temp"]
 
-    label = best_key.title()
+    label = best_key[0].upper() + best_key[1:]
     return run_cmd(client, st, best_ep, label, body, c)
 
 
@@ -856,7 +863,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
 #    g/G   jump to top/bottom
 #    /     keyword search (regex, case-insensitive)
 #    n/N   next/previous search match
-#    q/Esc close
+#    z/q/Esc close
 # =============================================================================
 
 _PAGER_CATS: List[Tuple[str, Tuple[str, ...]]] = [
@@ -880,15 +887,14 @@ def _pager_cat(ep: str) -> str:
 
 # Pairs/groups of registry keys rendered as one merged line in the pager and
 # collapsed to a single hint token in tab-completion suggestions.
-# Format:  display_string -> (merged_help, [key1, key2, …])
+# Format:  display_string -> (merged_help, [key1, key2, ...])
 # key1 is the canonical entry; key2+ are suppressed from individual rendering.
 _PAGER_ALIASES: Dict[str, Tuple[str, List[str]]] = {
     "sentry on|off":            ("Enable/disable Sentry Mode",                   ["sentry on",        "sentry off"]),
     "valet on|off":             ("Enable/disable valet mode (valet on <pwd>)",    ["valet on",         "valet off"]),
-    "honk|flash":               ("Honk the horn / flash the lights",              ["honk",             "flash"]),
     "lock|unlock":              ("Lock/unlock the doors",                         ["lock",             "unlock"]),
     "windows vent|close":       ("Vent/close all windows",                        ["windows vent",     "windows close"]),
-    "trunk toggle|frunk open":  ("Toggle trunk / open frunk",                     ["trunk toggle",     "frunk open"]),
+    "trunk toggle|frunk open":  ("Toggle trunk/open frunk",                       ["trunk toggle",     "frunk open"]),
     "charge start|stop":        ("Start/stop charging",                           ["charge start",     "charge stop"]),
     "port open|close":          ("Open/close the charge port",                    ["port open",        "port close"]),
     "climate on|off":           ("Turn climate on/off",                           ["climate on",       "climate off"]),
@@ -896,9 +902,8 @@ _PAGER_ALIASES: Dict[str, Tuple[str, List[str]]] = {
     "steering heat on|off":     ("Steering wheel heater on/off",                  ["steering heat on", "steering heat off"]),
     "sunroof vent|close":       ("Vent/close the sunroof",                        ["sunroof vent",     "sunroof close"]),
     "media play|next|prev":     ("Toggle playback / next / prev track",           ["media play",       "media next",  "media prev"]),
-    "media vol up|down":        ("Volume up/down",                                ["media vol up",     "media vol down"]),
     "speed limit on|off <pin>": ("Activate/deactivate speed limit",               ["speed limit on",   "speed limit off"]),
-    "speed limit set|clear":    ("Set limit mph 50-90 / clear PIN",               ["speed limit set",  "speed limit clear"]),
+    "speed limit set|clear":    ("Set limit mph 50-90/clear PIN",                 ["speed limit set",  "speed limit clear"]),
     "update start|cancel":      ("Start/cancel pending software update",          ["update start",     "update cancel"]),
 }
 
@@ -917,8 +922,8 @@ def _build_pager_lines(c: Colors) -> List[str]:
 
     lines: List[str] = []
     lines.append(
-        f"  {c.B}{c.MAG}Known commands {c.R}  "
-        f"{c.GRY}?/Esc/q close  j/k scroll  d/u half-page  g/G top/bottom  /search  n/N match{c.R}"
+        f"  {c.B}{c.MAG}COMMANDS {c.R}  "
+        f"{c.GRY}?/q/Esc close  j/k scroll  d/u half-page  g/G top/bottom  /search  n/N match{c.R}"
     )
     lines.append("")
 
@@ -967,12 +972,12 @@ def _build_pager_lines(c: Colors) -> List[str]:
 
 def show_cmd_pager(term: Term, c: Colors) -> None:
     """Open the command pager."""
-    _pager_builtin(term, c, _build_pager_lines(c), title="Known commands")
+    _pager_builtin(term, c, _build_pager_lines(c), title="COMMANDS")
 
 
 def _pager_search_prompt(term: Term, c: Colors,
                          plain_lines: List[str]) -> Tuple[str, List[int]]:
-    """Show / prompt at the bottom; return (pattern, matching_row_indices)."""
+    """Show/prompt at the bottom; return (pattern, matching_row_indices)."""
     import select as _sel
     _, term_h = term.get_size()
     row = term_h - 1
@@ -1095,7 +1100,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
         _, term_h = term.get_size()
         half = max(1, (term_h - 2) // 2)
 
-        if ch in ("q", "\x1b", "?"):
+        if ch in ("q", "\x1b", "?", "z"):
             break
         elif ch == "j":
             scroll_top = clamp(scroll_top + 1)
@@ -1139,7 +1144,7 @@ def show_log_pager(term: Term, c: Colors) -> None:
 
     all_lines: List[str] = [
         f"  {c.B}{c.MAG}COMMAND LOG{c.R}  "
-        f"{c.GRY}newest first  q/Esc close  j/k scroll  d/u half-page  g/G top/bottom{c.R}",
+        f"{c.GRY}newest first  z/q/Esc close  j/k scroll  d/u half-page  g/G top/bottom{c.R}",
         "",
     ]
 
@@ -1170,7 +1175,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
 
     dist_u  = "km"  if st.unit == "metric" else "mi"
-    temp_u  = "°C"   if st.unit == "metric" else "°F"
+    temp_u  = "°C"  if st.unit == "metric" else "°F"
     press_u = "bar" if st.unit == "metric" else "psi"
 
     name   = str(jget(data, "response.vehicle_state.vehicle_name", "Tesla"))
@@ -1402,12 +1407,14 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
     cmd_keys = {"H", "f", "L", "l", "C", "c", "p", "P", "o", ":"}
     if (not st.show_help) and (not st.show_cmd_pager) and (key in cmd_keys):
         if client is None:
-            st.cmd_msg = f"h help    {c.RED}X commands unavailable (no TESLA_REFRESH_TOKEN){c.R}"
-            log_cmd(key, st.cmd_msg)
+            msg    = "X TESLA_REFRESH_TOKEN missing"
+            st.cmd_msg = f"h help    {c.RED}{msg}{c.R}"
+            log_cmd(key, msg)
             return False
         if st.mode == "ro":
-            st.cmd_msg = f"h help    {c.RED}X commands disabled in ro (press m){c.R}"
-            log_cmd(key, st.cmd_msg)
+            msg    = "X no commands in ro mode (press m)"
+            st.cmd_msg = f"h help    {c.RED}{msg}{c.R}"
+            log_cmd(key, msg)
             return False
 
         if key == "H":
@@ -1510,7 +1517,7 @@ def main() -> int:
 
         term.write(f"Connected: {st.target_vin or '?VIN?'} (vid {vid}) [{st.mode}]\n")
         if not vid:
-            die("No vehicle found. Check TESLA_VIN or token.")
+            die("No vehicle found -- check TESLA_VIN or token")
 
         time.sleep(0.5)
 
