@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # =============================================================================
-#  teslui.py — A Tesla vehicle dashboard TUI (stdlib-only)
+#  tuisla — A Tesla TUI
 #
-#  USAGE:  python3 teslui.py [--mode MODE] [--unit UNIT] [--invert] [--simple] [--bw]
+#  USAGE:  python3 tuisla [--mode MODE] [--unit UNIT] [--invert] [--simple] [--bw]
 #
 #  MODES:  ro (read-only, default) | mtm (myteslamate) | vc (vehicle-command)
 #  UNITS:  metric | us
@@ -465,7 +465,7 @@ class TeslaClient:
             headers={
                 "Authorization": f"Bearer {self.access_token}",
                 "Content-Type":  "application/json",
-                "User-Agent":    "teslui/1.0",
+                "User-Agent":    "tuisla/1.0",
             },
         )
         return self._http(req)
@@ -478,7 +478,7 @@ class TeslaClient:
             headers={
                 "Authorization": f"Bearer {self.access_token}",
                 "Content-Type":  "application/json",
-                "User-Agent":    "teslui/1.0",
+                "User-Agent":    "tuisla/1.0",
             },
         )
         return self._http(req, ctx=ctx)
@@ -820,7 +820,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     def kcap(k: str, desc: str) -> str:
         return f"{c.REV} {k:<1} {c.R} {desc}"
 
-    frame.section(c, "TESLUI")
+    frame.section(c, "TUISLA")
     frame.row2(c, kcap("m", "mode"),        "", kcap("u", "units"),    "")
     frame.row2(c, kcap("r", "refresh"),     "", kcap("s", "style"),    "")
     frame.row2(c, kcap("-", "refresh -5s"), "", kcap("i", "invert"),   "")
@@ -1133,7 +1133,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
 
 
 def show_log_pager(term: Term, c: Colors) -> None:
-    """Read teslui.log and display it newest-first in the builtin pager."""
+    """Read tuisla.log and display it newest-first in the builtin pager."""
     try:
         with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
             raw_lines = f.readlines()
