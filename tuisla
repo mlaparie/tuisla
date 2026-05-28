@@ -395,19 +395,22 @@ def flush_frame(term: Term, c: Colors, frame: Frame) -> int:
             msg = f"{_TOO_SMALL_MSG_H} (now {term_w}x{term_h})"
         term.home()
         term.clear_to_end()
-        msg_vis = vlen(msg)
-        margin  = max(0, (term_w - msg_vis) // 2)
-        term.write("\n\n")
-        term.write(f"{' ' * margin}{c.YLW}{c.B}{msg}{c.R}\n")
-        return 2
+        msg_vis  = vlen(msg)
+        h_margin = max(0, (term_w - msg_vis) // 2)
+        v_margin = max(0, (term_h - 1) // 2)
+        term.move(v_margin, 0)
+        term.write(f"{' ' * h_margin}{c.YLW}{c.B}{msg}{c.R}\n")
+        return v_margin
 
-    w      = min(frame.maxvis, term_w)
-    margin = max(0, (term_w - w) // 2)
+    w        = min(frame.maxvis, term_w)
+    h_margin = max(0, (term_w - w) // 2)
+    v_margin = max(0, (term_h - len(frame.lines)) // 2)
     term.home()
     term.clear_to_end()
+    term.move(v_margin, 0)
     for line in frame.lines:
-        term.write((" " * margin) + line + c.R + "\n")
-    return len(frame.lines) - 1
+        term.write((" " * h_margin) + line + c.R + "\n")
+    return v_margin + len(frame.lines) - 1
 
 
 def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0) -> str:
