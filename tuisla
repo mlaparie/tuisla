@@ -27,9 +27,12 @@ import json
 import os
 import re
 import secrets
+import shlex
+import shutil
 import ssl
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -436,6 +439,103 @@ def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+class _CallbackCatcher:
+    """Temporarily makes us the desktop handler for tesla:// links (Linux, via
+    xdg-mime) so the browser hands over the login callback. close() restores
+    the previous handler."""
+
+    SCHEME = "x-scheme-handler/tesla"
+
+    def __init__(self) -> None:
+        self.tmp     = ""
+        self.out     = ""
+        self.name    = f"tuisla-login-{os.getpid()}.desktop"
+        self.apps    = os.path.join(os.environ.get("XDG_DATA_HOME")
+                                    or os.path.expanduser("~/.local/share"), "applications")
+        self.desktop = os.path.join(self.apps, self.name)
+        self.prev    = ""
+        self.armed   = False
+
+    def _xdg(self, *args: str) -> str:
+        return subprocess.run(["xdg-mime", *args], check=True, capture_output=True,
+                              text=True, timeout=10).stdout.strip()
+
+    def arm(self) -> bool:
+        if not sys.platform.startswith("linux") or not shutil.which("xdg-mime"):
+            return False
+        try:
+            # Query before our .desktop file exists: with no default set,
+            # xdg-mime falls back to any file that lists the scheme.
+            self.prev = self._xdg("query", "default", self.SCHEME)
+            if self.prev == self.name:
+                self.prev = ""
+            self.tmp = tempfile.mkdtemp(prefix="tuisla-login-")
+            self.out = os.path.join(self.tmp, "callback.txt")
+            helper   = os.path.join(self.tmp, "callback.sh")
+            # xdg-open's generic mode splits Exec= on spaces and ignores quotes.
+            if not re.fullmatch(r"[A-Za-z0-9._/-]+", helper):
+                raise RuntimeError("temp path needs quoting")
+            with open(helper, "w") as f:
+                f.write(f"#!/bin/sh\nprintf '%s' \"$1\" > {shlex.quote(self.out)}\n")
+            os.chmod(helper, 0o700)
+            os.makedirs(self.apps, exist_ok=True)
+            with open(self.desktop, "w") as f:
+                f.write("[Desktop Entry]\n"
+                        "Type=Application\n"
+                        "Name=tuisla login callback\n"
+                        f"Exec={helper} %u\n"
+                        "NoDisplay=true\n"
+                        "Terminal=false\n"
+                        f"MimeType={self.SCHEME};\n")
+            self.armed = True
+            self._xdg("default", self.name, self.SCHEME)
+            return True
+        except Exception:
+            self.close()
+            return False
+
+    def wait(self, timeout: float) -> str:
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                with open(self.out) as f:
+                    got = f.read().strip()
+                if got:
+                    return got
+            except OSError:
+                pass
+            time.sleep(0.5)
+        return ""
+
+    def close(self) -> None:
+        if self.armed:
+            self.armed = False
+            try:
+                if self.prev:
+                    self._xdg("default", self.prev, self.SCHEME)
+                else:
+                    # xdg-mime cannot unset a default; drop our line by hand.
+                    cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+                    for path in (os.path.join(cfg, "mimeapps.list"),
+                                 os.path.join(self.apps, "mimeapps.list")):
+                        try:
+                            with open(path) as f:
+                                lines = f.readlines()
+                        except OSError:
+                            continue
+                        keep = [ln for ln in lines
+                                if not (ln.startswith(self.SCHEME + "=") and self.name in ln)]
+                        if keep != lines:
+                            with open(path, "w") as f:
+                                f.writelines(keep)
+            except Exception:
+                pass
+        for fn in (lambda: os.remove(self.desktop),
+                   lambda: shutil.rmtree(self.tmp) if self.tmp else None):
+            try: fn()
+            except Exception: pass
+
+
 def login() -> int:
     # Prompts go to stderr so stdout carries only the token, e.g.:
     #   set -Ux TESLA_REFRESH_TOKEN (python3 tuisla --login)
@@ -455,32 +555,49 @@ def login() -> int:
         "state":                 state,
     }, quote_via=urllib.parse.quote)
 
-    # Tesla redirects to tesla://auth/callback, which a desktop browser cannot
-    # open, so the code has to be copied from the redirect in DevTools.
-    say("1. A browser window with Tesla's sign-in page will open. BEFORE signing in,")
-    say("   open DevTools (F12) > Network and tick 'Preserve log' / 'Persist Logs'.")
-    say("   If no browser opens, use this URL:\n")
-    say(f"   {url}\n")
-    say("2. Sign in. The browser then fails to open (or asks to open) a tesla:// link.")
-    say("   That is expected.")
-    say("3. In the Network list, find the last auth.tesla.com request with status 302")
-    say(f"   and copy its 'Location' response header ({LOGIN_REDIRECT}?code=...).")
-    say("   Firefox: right-click the row > Copy Value > Copy Location.\n")
+    # Tesla sends the browser to tesla://auth/callback?code=..., which a desktop
+    # browser cannot open. Catch it with a temporary tesla:// handler if we can,
+    # otherwise the user copies it out of DevTools.
+    catcher = _CallbackCatcher()
+    pasted  = ""
     try:
-        webbrowser.open(url)
-    except Exception:
-        pass
+        auto = catcher.arm()
+        say("Sign in to your Tesla account in the browser window that opens.")
+        say("If no browser opens, use this URL:\n")
+        say(f"   {url}\n")
+        try:
+            webbrowser.open(url)
+        except Exception:
+            pass
+        if auto:
+            say("After signing in, allow the browser to open the tesla:// link")
+            say("(with 'tuisla login callback'). Waiting up to 5 min; Ctrl-C to paste instead.")
+            try:
+                pasted = catcher.wait(300)
+            except KeyboardInterrupt:
+                say()
+    finally:
+        catcher.close()
 
-    try:
-        sys.stderr.write("Redirect URL: "); sys.stderr.flush()
-        pasted = input().strip()
-    except (EOFError, KeyboardInterrupt):
-        say()
-        return 1
+    if not pasted:
+        say("\nTo copy the link by hand: open DevTools (F12) > Network BEFORE signing in")
+        say("and keep it open. After signing in, search the Network panel")
+        say(f"(magnifier icon / Ctrl+Shift+F) for '{LOGIN_REDIRECT}' and copy that")
+        say("whole link from the matching response, or just the value after 'code='.\n")
+        try:
+            sys.stderr.write("Callback URL or code: "); sys.stderr.flush()
+            pasted = input().strip()
+        except (EOFError, KeyboardInterrupt):
+            say()
+            return 1
 
-    # Drop terminal escapes (e.g. bracketed-paste markers) and whitespace, then
-    # read parameters from both the query and the fragment of the URL.
-    pasted = re.sub(r"\x1b\[[0-9;]*~?|\s", "", pasted).strip("'\"")
+    # Drop terminal escapes (e.g. bracketed-paste markers), whitespace and quotes,
+    # undo JSON escaping, then read parameters from the query and the fragment.
+    pasted = re.sub(r"\x1b\[[0-9;]*~?|\s", "", pasted).strip("'\",")
+    pasted = pasted.replace("\\/", "/").replace("\\u0026", "&")
+    if re.fullmatch(r"[A-Za-z0-9._~-]+", pasted):
+        say("! Got a bare code; skipping the state check")
+        pasted = f"{LOGIN_REDIRECT}?code={pasted}&state={state}"
     parts  = urllib.parse.urlparse(pasted)
     query  = urllib.parse.parse_qs(parts.query)
     for k, v in urllib.parse.parse_qs(parts.fragment).items():
