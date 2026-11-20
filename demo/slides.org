@@ -11,16 +11,10 @@ Battery, charging, climate, tyres and locks at a glance.
 
 Refreshes every 5 s.
 
-* Units  =u=
-Metric or US units.
-
 * Help  =h=
 Keys and current settings.
 
 Toggles take effect right away.
-
-* Help: style  =s=
-Fancy or minimal style.
 
 * Help: colors  =b=
 Off by default; =-c= starts with colors.
@@ -30,6 +24,17 @@ Inverted screen.
 
 * Help: refresh rate  =+ -=
 Refresh interval in 5 s steps.
+
+* Help: units  =u=
+Metric or US units, seen on the dashboard.
+
+* Help: style  =s=
+Fancy or minimal style.
+
+* Back to dashboard  =h=
+US units and minimal style.
+
+Then =s= and =u= switch back.
 
 * Command list  =?=
 Every command, by category.
@@ -42,7 +47,7 @@ Regex search in the list.
 =n= / =N= jump between matches.
 
 * Type a command  =:=
-Tab completes.
+Tab completes, e.g. =charge limit 80=, =temp 22=.
 
 In read-only mode commands are checked but not sent.
 

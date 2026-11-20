@@ -23,22 +23,22 @@ def typed(text: str, gap: float = 0.12):
 # (caption step or None, [(delay before key, key[, literal]), ...], pause after)
 SCRIPT = [
     (0,  [], 4.0),
-    (1,  [(0.8, "u"), (2.5, "u")], 1.5),
-    (2,  [(0.8, "h")], 2.5),                                  # help stays open for 3-6
-    (3,  [(0.8, "s"), (2.2, "s")], 1.0),
-    (4,  [(0.8, "b")], 2.5),                                  # colors stay on
-    (5,  [(0.8, "i"), (2.2, "i")], 1.0),
-    (6,  [(0.8, "+"), (1.5, "+"), (1.5, "-"), (1.5, "-")], 1.5),
-    (None, [(0, "h")], 0.5),
-    (7,  [(0.8, "?"), (2.0, "j"), (0.3, "j"), (0.3, "j"), (0.3, "j")], 1.5),
-    (8,  [(0.8, "/")] + typed("climate", 0.15) + [(0.8, "Enter"), (2.0, "n")], 2.0),
+    (1,  [(0.8, "h")], 2.5),                                  # help stays open for 2-6
+    (2,  [(0.8, "b")], 2.5),                                  # colors stay on
+    (3,  [(0.8, "i"), (2.2, "i")], 1.0),
+    (4,  [(0.8, "+"), (1.5, "+"), (1.5, "-"), (1.5, "-")], 1.5),
+    (5,  [(0.8, "u")], 1.5),                                  # visible on the dashboard
+    (6,  [(0.8, "s")], 2.0),
+    (7,  [(0.8, "h"), (3.0, "s"), (2.5, "u")], 2.5),          # US + minimal, then back
+    (8,  [(0.8, "?"), (2.0, "j"), (0.3, "j"), (0.3, "j"), (0.3, "j")], 1.5),
+    (9,  [(0.8, "/")] + typed("climate", 0.15) + [(0.8, "Enter"), (2.0, "n")], 2.0),
     (None, [(0, "q")], 0.5),
-    (9,  [(0.8, ":")] + typed("ch") + [(0.6, "Tab"), (1.8, "Tab")] + typed("limit 80")
-         + [(1.2, "Enter")], 3.0),
-    (10, [(0.8, "H")], 3.0),
-    (11, [(0.8, "z")], 3.5),
+    (10, [(0.8, ":")] + typed("ch") + [(0.6, "Tab"), (1.8, "Tab")] + typed("limit 80")
+         + [(1.2, "Enter"), (2.5, ":")] + typed("temp 22") + [(1.0, "Enter")], 3.0),
+    (11, [(0.8, "H")], 3.0),
+    (12, [(0.8, "z")], 3.5),
     (None, [(0, "q")], 0.5),
-    (12, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
+    (13, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
 ]   # the cast ends here, before anything quits, so a GIF of it loops cleanly
 
 
@@ -108,6 +108,7 @@ def main() -> None:
             for delay, key, *literal in keys:
                 pump(delay)
                 tmux("send-keys", "-t", "demo:0.1", *(["-l"] if literal else []), key)
+                fifo.write(f"key {key}\n")
             pump(after)
         cut = time.time() - start
         fifo.write("end\n")
