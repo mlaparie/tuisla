@@ -1158,9 +1158,8 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         return result
 
     def fail(msg: str) -> str:
-        result = f"h help    {c.RED}X {msg}{c.R}"
-        log_cmd(best_ep or raw, result)
-        return result
+        log_cmd(best_ep or raw, f"X {msg}")
+        return f"h help    {c.RED}X {msg}{c.R}"
 
     arg_tokens = tokens[best_len:]
     if len(arg_tokens) < len(best_args):
