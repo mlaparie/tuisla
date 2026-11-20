@@ -471,10 +471,25 @@ def login() -> int:
         say()
         return 1
 
-    query = urllib.parse.parse_qs(urllib.parse.urlparse(pasted).query)
+    # Drop terminal escapes (e.g. bracketed-paste markers) and whitespace, then
+    # read parameters from both the query and the fragment of the URL.
+    pasted = re.sub(r"\x1b\[[0-9;]*~?|\s", "", pasted)
+    parts  = urllib.parse.urlparse(pasted)
+    query  = urllib.parse.parse_qs(parts.query)
+    for k, v in urllib.parse.parse_qs(parts.fragment).items():
+        query.setdefault(k, v)
     code  = (query.get("code")  or [""])[0]
     if not code:
-        say("X No 'code' parameter found in that URL")
+        err = (query.get("error_description") or query.get("error") or [""])[0]
+        if err:
+            say(f"X Tesla returned an error: {err}")
+        elif pasted.startswith(AUTHORIZE_URL):
+            say("X That is the login URL -- paste the URL you land on after signing in")
+        else:
+            seen = ", ".join(sorted(query)) or "none"
+            say(f"X No 'code' parameter in that URL"
+                f" (page: {parts.netloc}{parts.path or '/'}; parameters: {seen})")
+            say(f"  Expected a URL starting with {LOGIN_REDIRECT}?...code=...")
         return 1
     if (query.get("state") or [""])[0] != state:
         say("X State mismatch -- paste the URL from this login attempt")
