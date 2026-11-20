@@ -681,19 +681,14 @@ def login(print_token: bool = False) -> int:
     issuer    = (query.get("issuer") or [""])[0].rstrip("/")
     token_url = (issuer + "/token") if issuer.startswith("https://auth.tesla.") else AUTH_URL
 
-    form = urllib.parse.urlencode({
-        "grant_type":    "authorization_code",
-        "client_id":     OWNER_CLIENT_ID,
-        "code":          code,
-        "code_verifier": verifier,
-        "redirect_uri":  LOGIN_REDIRECT,
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        token_url, method="POST", data=form,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-    )
     try:
-        resp = TeslaClient("")._http(req)
+        resp = auth_post(token_url, {
+            "grant_type":    "authorization_code",
+            "client_id":     OWNER_CLIENT_ID,
+            "code":          code,
+            "code_verifier": verifier,
+            "redirect_uri":  LOGIN_REDIRECT,
+        })
     except RuntimeError as e:
         say(f"X Token exchange failed: {e}")
         return 1
@@ -721,6 +716,44 @@ def login(print_token: bool = False) -> int:
 #  Tesla API client
 # =============================================================================
 
+def auth_post(url: str, form: Dict[str, str]) -> Dict[str, Any]:
+    """POST a form to auth.tesla.com.  Since mid-2026 Tesla only issues tokens
+    that owner-api accepts when this request uses TLS 1.3 and HTTP/2 (other
+    clients get HTTP 403 "forbidden, see .../fleet-api" afterwards).  Python's
+    stdlib has no HTTP/2, so use curl; fall back to urllib with TLS 1.3."""
+    if shutil.which("curl"):
+        def q(v: str) -> str:
+            return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        # Secrets go in a config on stdin so they never show up in `ps`.
+        cfg = [f"url = {q(url)}", 'header = "Content-Type: application/x-www-form-urlencoded"']
+        cfg += [f"data-urlencode = {q(k + '=' + v)}" for k, v in form.items()]
+        try:
+            out = subprocess.run(
+                ["curl", "-sS", "--http2", "--tlsv1.3", "--max-time", "20",
+                 "-w", "\n%{http_code}", "-K", "-"],
+                input="\n".join(cfg) + "\n", capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            raise RuntimeError(f"curl failed: {e}") from e
+        if out.returncode != 0:
+            raise RuntimeError(f"curl failed: {out.stderr.strip()[:200]}")
+        body, _, code = out.stdout.rpartition("\n")
+        if not code.startswith("2"):
+            raise RuntimeError(f"HTTP {code}: {body[:300]}")
+        try:
+            return json.loads(body) if body else {}
+        except ValueError as e:
+            raise RuntimeError(f"Bad response from {url}: {body[:200]}") from e
+
+    ctx = ssl.create_default_context()
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    req = urllib.request.Request(
+        url, method="POST", data=urllib.parse.urlencode(form).encode("utf-8"),
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    return TeslaClient("")._http(req, ctx=ctx)
+
+
 class TeslaClient:
     def __init__(self, refresh_token: str,
                  on_rotate: Optional[Callable[[str], None]] = None) -> None:
@@ -741,17 +774,12 @@ class TeslaClient:
             raise RuntimeError(str(e)) from e
 
     def refresh_access_token(self) -> None:
-        form = urllib.parse.urlencode({
+        resp = auth_post(AUTH_URL, {
             "grant_type":    "refresh_token",
             "client_id":     OWNER_CLIENT_ID,
             "refresh_token": self.refresh_token,
             "scope":         "openid email offline_access",
-        }).encode("utf-8")
-        req  = urllib.request.Request(
-            AUTH_URL, method="POST", data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
-        resp = self._http(req)
+        })
         at   = resp.get("access_token") or ""
         if not at:
             raise RuntimeError("Token refresh failed (missing access_token)")
@@ -1964,6 +1992,10 @@ def main() -> int:
     print(f"tuisla: {err}", file=sys.stderr)
     if err.startswith(("HTTP 400", "HTTP 401", "Token refresh failed")):
         print("tuisla: the refresh token looks invalid -- run: tuisla --login", file=sys.stderr)
+    elif err.startswith("HTTP 403"):
+        print("tuisla: Tesla refused the Owner API access token. Check that `curl -V` lists\n"
+              "        HTTP2 (tuisla renews tokens over TLS 1.3 + HTTP/2 with curl); if it\n"
+              "        does, Tesla may have closed the Owner API for this account.", file=sys.stderr)
     return 1
 
 
