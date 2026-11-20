@@ -12,8 +12,9 @@
 #          token to $XDG_STATE_HOME/tuisla/refresh_token (~/.local/state/...),
 #          mode 600.  tuisla keeps that file up to date when Tesla rotates the
 #          token.  --print writes the token to stdout instead of saving it.
-#          --login-mtm opens the MyTeslaMate Fleet page and asks for the token
-#          shown there (Enter skips), saved as .../tuisla/myteslamate_token.
+#          --login-mtm opens MyTeslaMate (API tab: allow commands for the
+#          vehicle, copy the MyTeslaMate API token, not the Fleet API one) and
+#          asks for that token (Enter skips); saved as .../myteslamate_token.
 #
 #  MODES:  Vehicle data is always read from the Tesla Owner API; the mode only
 #          decides where commands go.
@@ -464,7 +465,7 @@ def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0)
 # =============================================================================
 
 MTM_TOKEN_FILE = "myteslamate_token"
-MTM_FLEET_URL  = "https://app.myteslamate.com/fleet"
+MTM_APP_URL    = "https://app.myteslamate.com"
 
 
 def token_path(name: str = "refresh_token") -> str:
@@ -727,17 +728,18 @@ def login(print_token: bool = False, then_mtm: bool = True) -> int:
 
 
 def login_mtm() -> int:
-    # MyTeslaMate has no API to hand out its token: it is shown on their Fleet
-    # page after signing in there with the Tesla account, so open that page and
-    # have the user paste it.
+    # MyTeslaMate has no API to hand out its token: it is shown in their web
+    # app after signing in there with the Tesla account, so open it and have
+    # the user paste the token.
     def say(msg: str = "") -> None:
         print(msg, file=sys.stderr, flush=True)
 
     say("MyTeslaMate token (used to send commands in mtm mode):")
-    say("Sign in to MyTeslaMate with your Tesla account and copy the token shown")
-    say(f"on the Fleet page:\n\n   {MTM_FLEET_URL}\n")
+    say(f"1. Sign in to MyTeslaMate with your Tesla account:\n\n   {MTM_APP_URL}\n")
+    say("2. Open the API tab and allow commands for your vehicle.")
+    say("3. Copy the MyTeslaMate API token (not the Fleet API one) and paste it here.\n")
     try:
-        webbrowser.open(MTM_FLEET_URL)
+        webbrowser.open(MTM_APP_URL)
     except Exception:
         pass
     try:
@@ -1880,7 +1882,7 @@ def main() -> int:
     ap.add_argument("--login-tesla",   action="store_true",
                     help="Sign in to Tesla and save a refresh token, then exit")
     ap.add_argument("--login-mtm",     action="store_true",
-                    help="Save a MyTeslaMate token (from their Fleet page), then exit")
+                    help="Save a MyTeslaMate API token (from their API tab), then exit")
     ap.add_argument("--print",         action="store_true",
                     help="With --login-tesla: print the Tesla token instead of saving it")
     args = ap.parse_args()
