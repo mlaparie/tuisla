@@ -465,7 +465,7 @@ def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0)
 # =============================================================================
 
 MTM_TOKEN_FILE = "myteslamate_token"
-MTM_APP_URL    = "https://app.myteslamate.com"
+MTM_API_URL    = "https://app.myteslamate.com/fleet"   # the "API" tab
 
 
 def token_path(name: str = "refresh_token") -> str:
@@ -735,11 +735,11 @@ def login_mtm() -> int:
         print(msg, file=sys.stderr, flush=True)
 
     say("MyTeslaMate token (used to send commands in mtm mode):")
-    say(f"1. Sign in to MyTeslaMate with your Tesla account:\n\n   {MTM_APP_URL}\n")
-    say("2. Open the API tab and allow commands for your vehicle.")
+    say(f"1. Sign in to MyTeslaMate with your Tesla account; this opens the API tab:\n\n   {MTM_API_URL}\n")
+    say("2. Allow commands for your vehicle.")
     say("3. Copy the MyTeslaMate API token (not the Fleet API one) and paste it here.\n")
     try:
-        webbrowser.open(MTM_APP_URL)
+        webbrowser.open(MTM_API_URL)
     except Exception:
         pass
     try:
