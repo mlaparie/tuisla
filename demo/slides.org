@@ -14,14 +14,22 @@ Refreshes every 5 s.
 * Units  =u=
 Metric or US units.
 
-* Colors  =b=
-Off by default; =-c= starts with colors.
-
-* Invert  =i=
-Inverted screen.
-
 * Help  =h=
 Keys and current settings.
+
+Toggles take effect right away.
+
+* Help: style  =s=
+Fancy or minimal style.
+
+* Help: colors  =b=
+Off by default; =-c= starts with colors.
+
+* Help: invert  =i=
+Inverted screen.
+
+* Help: refresh rate  =+ -=
+Refresh interval in 5 s steps.
 
 * Command list  =?=
 Every command, by category.
@@ -45,9 +53,6 @@ Not sent in read-only mode.
 
 * Command log  =z=
 Every command and its result is logged.
-
-* Refresh rate  =+ -=
-Refresh interval in 5 s steps, shown in help.
 
 * Modes  =m=
 =ro= → =mtm= (MyTeslaMate API) → =vc= (vehicle-command, WIP).

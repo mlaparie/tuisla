@@ -24,9 +24,12 @@
 (defvar demo-steps
   `((0   . slide)                       ; Dashboard
     (4.0 . slide) (0.8 . "u") (2.5 . "u")
-    (1.5 . slide) (0.8 . "b")
-    (2.5 . slide) (0.8 . "i") (2.5 . "i")
-    (1.0 . slide) (0.8 . "h") (4.0 . "h")
+    (1.5 . slide) (0.8 . "h")                        ; help stays open for the next 4
+    (2.5 . slide) (0.8 . "s") (2.2 . "s")
+    (1.0 . slide) (0.8 . "b")                        ; colors stay on
+    (2.5 . slide) (0.8 . "i") (2.2 . "i")
+    (1.0 . slide) (0.8 . "+") (1.5 . "+") (1.5 . "-") (1.5 . "-")
+    (1.5 . "h")
     (0.5 . slide) (0.8 . "?") (2.0 . "j") (0.3 . "j") (0.3 . "j") (0.3 . "j")
     (1.5 . slide) (0.8 . "/") ,@(demo-typed "climate" 0.15)
     (0.8 . "\r") (2.0 . "n") (2.0 . "q")
@@ -34,7 +37,6 @@
     (0.6 . "\t") (1.8 . "\t") ,@(demo-typed "limit 80") (1.2 . "\r")
     (3.0 . slide) (0.8 . "H")
     (3.0 . slide) (0.8 . "z") (3.5 . "q")
-    (0.5 . slide) (0.8 . "+") (1.0 . "h") (3.5 . "h")
     (0.5 . slide) (0.8 . "m") (2.2 . "m") (2.2 . "m")
     (2.5 . end)))   ; the cast ends here, before anything quits, so a GIF loops
 

@@ -6,15 +6,16 @@ import os, signal, sys, textwrap
 STEPS = [
     ("Dashboard",       "",      "Battery, charging, climate, tyres and locks at a glance. Refreshes every 5 s."),
     ("Units",           "u",     "Metric or US units."),
-    ("Colors",          "b",     "Off by default; -c starts with colors."),
-    ("Invert",          "i",     "Inverted screen."),
-    ("Help",            "h",     "Keys and current settings."),
+    ("Help",            "h",     "Keys and current settings. Toggles take effect right away:"),
+    ("  Style",         "s",     "Fancy or minimal style."),
+    ("  Colors",        "b",     "Off by default; -c starts with colors."),
+    ("  Invert",        "i",     "Inverted screen."),
+    ("  Refresh rate",  "+ -",   "Refresh interval in 5 s steps."),
     ("Command list",    "?",     "Every command, by category. j/k to scroll."),
     ("Search",          "/",     "Regex search in the list; n/N jump between matches."),
     ("Type a command",  ":",     "Tab completes. In read-only mode commands are checked but not sent."),
     ("Hotkeys",         "H",     "One-key commands, e.g. H honks (not sent in read-only mode)."),
     ("Command log",     "z",     "Every command and its result is logged."),
-    ("Refresh rate",    "+ -",   "Refresh interval in 5 s steps, shown in help."),
     ("Modes",           "m",     "ro -> mtm (MyTeslaMate API) -> vc (vehicle-command, WIP)."),
 ]
 
