@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Record the tuisla demo as an asciicast: a private tmux server with a
+caption pane (captions.py) on the left and tuisla on the right, driven by a
+scripted key sequence.  tuisla runs on its built-in demo data, in read-only
+mode, from a temporary copy (so it logs there and sees no tokens).
+
+Usage: demo/record-tmux.py [OUT.cast]      (default: demo/tuisla.cast)
+Needs: tmux, python3.  Make a GIF with: agg demo/tuisla.cast demo/tuisla.gif"""
+import fcntl, json, os, pty, select, shlex, shutil, struct, subprocess, sys
+import tempfile, termios, time
+
+HERE      = os.path.dirname(os.path.abspath(__file__))
+OUT       = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "tuisla.cast"))
+COLS, ROWS = 132, 32
+CAPTION_W = 34
+SOCK      = f"tuisla-demo-{os.getpid()}"      # private tmux server, not the user's
+
+
+def typed(text: str, gap: float = 0.12):
+    return [(gap, ch, True) for ch in text]   # True: send literally
+
+
+# (caption step or None, [(delay before key, key[, literal]), ...], pause after)
+SCRIPT = [
+    (0,  [], 4.0),
+    (1,  [(0.8, "u"), (2.5, "u")], 1.5),
+    (2,  [(0.8, "b")], 2.5),
+    (3,  [(0.8, "i"), (2.5, "i")], 1.0),
+    (4,  [(0.8, "h")], 4.0),
+    (None, [(0, "h")], 0.5),
+    (5,  [(0.8, "?"), (2.0, "j"), (0.3, "j"), (0.3, "j"), (0.3, "j")], 1.5),
+    (6,  [(0.8, "/")] + typed("climate", 0.15) + [(0.8, "Enter"), (2.0, "n")], 2.0),
+    (None, [(0, "q")], 0.5),
+    (7,  [(0.8, ":")] + typed("ch") + [(0.6, "Tab"), (1.8, "Tab")] + typed("limit 80")
+         + [(1.2, "Enter")], 3.0),
+    (8,  [(0.8, "H")], 3.0),
+    (9,  [(0.8, "z")], 3.5),
+    (None, [(0, "q")], 0.5),
+    (10, [(0.8, "+"), (1.0, "h")], 3.5),
+    (None, [(0, "h")], 0.5),
+    (11, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
+]   # the cast ends here, before anything quits, so a GIF of it loops cleanly
+
+
+def main() -> None:
+    tmp    = tempfile.mkdtemp(prefix="tuisla-demo-")
+    tuisla = os.path.join(tmp, "tuisla")
+    fifo_p = os.path.join(tmp, "captions.fifo")
+    conf   = os.path.join(tmp, "tmux.conf")
+    shutil.copy(os.path.join(HERE, "..", "tuisla"), tuisla)
+    os.mkfifo(fifo_p)
+    with open(conf, "w") as f:
+        f.write("set -g status off\n"
+                "set -g escape-time 0\n"
+                "set -g default-terminal screen-256color\n"
+                "set -g pane-border-style fg=colour8\n"
+                "set -g pane-active-border-style fg=colour8\n")
+
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("TMUX", "TESLA_REFRESH_TOKEN", "MYTESLAMATE_TOKEN", "TESLA_VIN")}
+    env.update(TERM="xterm-256color", XDG_STATE_HOME=os.path.join(tmp, "state"))
+
+    def tmux(*args: str) -> None:
+        subprocess.run(["tmux", "-L", SOCK, *args], check=True)
+
+    caption_cmd = f"python3 -B {shlex.quote(os.path.join(HERE, 'captions.py'))} {shlex.quote(fifo_p)}"
+    tuisla_cmd  = f"python3 -B {shlex.quote(tuisla)} -m ro"
+
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvpe("tmux", ["tmux", "-L", SOCK, "-f", conf, "new-session", "-s", "demo",
+                            "-x", str(COLS), "-y", str(ROWS), caption_cmd], env)
+    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
+
+    start, events = time.time(), []
+
+    def pump(seconds: float) -> None:
+        end = time.time() + seconds
+        while (left := end - time.time()) > 0:
+            r, _, _ = select.select([fd], [], [], left)
+            if not r:
+                continue
+            try:
+                data = os.read(fd, 65536)
+            except OSError:
+                return
+            if not data:
+                return
+            events.append([time.time() - start, "o", data.decode("utf-8", "replace")])
+
+    try:
+        pump(1.0)
+        fifo = open(fifo_p, "w", buffering=1)      # captions.py has opened its end by now
+        tmux("split-window", "-h", "-t", "demo:0", "-l", str(COLS - CAPTION_W - 1), tuisla_cmd)
+        fifo.write("0\n")
+        pump(2.0)
+        t0 = time.time() - start                  # both panes drawn: the cast starts here
+        for step, keys, after in SCRIPT:
+            if step is not None:
+                fifo.write(f"{step}\n")
+            for delay, key, *literal in keys:
+                pump(delay)
+                tmux("send-keys", "-t", "demo:0.1", *(["-l"] if literal else []), key)
+            pump(after)
+        cut = time.time() - start
+        fifo.write("end\n")
+        fifo.close()
+    finally:
+        subprocess.run(["tmux", "-L", SOCK, "kill-server"], stderr=subprocess.DEVNULL)
+        os.close(fd)
+        os.waitpid(pid, 0)
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    with open(OUT, "w", encoding="utf-8") as f:
+        f.write(json.dumps({"version": 2, "width": COLS, "height": ROWS,
+                            "timestamp": int(start), "title": "tuisla demo (read-only mode)",
+                            "env": {"TERM": "xterm-256color", "SHELL": "/bin/sh"}}) + "\n")
+        # Output before t0 (tmux and tuisla starting up) is played instantly at
+        # 0 s, so the cast opens on a full screen.  Drop whatever follows `cut`.
+        for ts, kind, data in events:
+            if ts < cut:
+                f.write(json.dumps([round(max(0.0, ts - t0), 3), kind, data]) + "\n")
+    print(f"wrote {OUT} ({cut - t0:.0f} s)")
+
+
+if __name__ == "__main__":
+    main()
