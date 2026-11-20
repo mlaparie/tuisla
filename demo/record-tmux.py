@@ -23,22 +23,23 @@ def typed(text: str, gap: float = 0.12):
 # (caption step or None, [(delay before key, key[, literal]), ...], pause after)
 SCRIPT = [
     (0,  [], 4.0),
-    (1,  [(0.8, "h")], 2.5),                                  # help stays open for 2-6
-    (2,  [(0.8, "b")], 2.5),                                  # colors stay on
-    (3,  [(0.8, "i"), (2.2, "i")], 1.0),
-    (4,  [(0.8, "+"), (1.5, "+"), (1.5, "-"), (1.5, "-")], 1.5),
-    (5,  [(0.8, "u")], 1.5),                                  # visible on the dashboard
-    (6,  [(0.8, "s")], 2.0),
-    (7,  [(0.8, "h"), (3.0, "s"), (2.5, "u")], 2.5),          # US + minimal, then back
-    (8,  [(0.8, "?"), (2.0, "j"), (0.3, "j"), (0.3, "j"), (0.3, "j")], 1.5),
-    (9,  [(0.8, "/")] + typed("climate", 0.15) + [(0.8, "Enter"), (2.0, "n")], 2.0),
+    (1,  [(0.8, "h")], 2.0),                                  # help stays open for 2-6
+    (2,  [(0.8, "+"), (1.5, "+"), (1.5, "-"), (1.5, "-")], 1.5),
+    # The rest: toggle in help, close help to see it on the dashboard, revert
+    # it there (colors stay on), reopen help.  Style ends on the dashboard.
+    (3,  [(0.8, "b"), (1.2, "h"), (2.5, "h")], 1.0),
+    (4,  [(0.8, "i"), (1.2, "h"), (2.5, "i"), (1.5, "h")], 1.0),
+    (5,  [(0.8, "u"), (1.2, "h"), (2.5, "u"), (1.5, "h")], 1.0),
+    (6,  [(0.8, "s"), (1.2, "h"), (2.5, "s")], 2.0),
+    (7,  [(0.8, "?"), (2.0, "j"), (0.3, "j"), (0.3, "j"), (0.3, "j")], 1.5),
+    (8,  [(0.8, "/")] + typed("climate", 0.15) + [(0.8, "Enter"), (2.0, "n")], 2.0),
     (None, [(0, "q")], 0.5),
-    (10, [(0.8, ":")] + typed("ch") + [(0.6, "Tab"), (1.8, "Tab")] + typed("limit 80")
+    (9,  [(0.8, ":")] + typed("ch") + [(0.6, "Tab"), (1.8, "Tab")] + typed("limit 80")
          + [(1.2, "Enter"), (2.5, ":")] + typed("temp 22") + [(1.0, "Enter")], 3.0),
-    (11, [(0.8, "H")], 3.0),
-    (12, [(0.8, "z")], 3.5),
+    (10, [(0.8, "H")], 3.0),
+    (11, [(0.8, "z")], 3.5),
     (None, [(0, "q")], 0.5),
-    (13, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
+    (12, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
 ]   # the cast ends here, before anything quits, so a GIF of it loops cleanly
 
 

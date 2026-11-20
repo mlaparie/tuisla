@@ -24,12 +24,13 @@
 (defvar demo-steps
   `((0   . slide)                       ; Dashboard
     (4.0 . slide) (0.8 . "h")                        ; help stays open for the next 5
-    (2.5 . slide) (0.8 . "b")                        ; colors stay on
-    (2.5 . slide) (0.8 . "i") (2.2 . "i")
-    (1.0 . slide) (0.8 . "+") (1.5 . "+") (1.5 . "-") (1.5 . "-")
-    (1.5 . slide) (0.8 . "u")                        ; visible on the dashboard
-    (1.5 . slide) (0.8 . "s")
-    (2.0 . slide) (0.8 . "h") (3.0 . "s") (2.5 . "u") ; US + minimal, then back
+    (2.0 . slide) (0.8 . "+") (1.5 . "+") (1.5 . "-") (1.5 . "-")
+    ;; Toggle in help, close help to see it on the dashboard, revert it there
+    ;; (colors stay on), reopen help.  Style ends on the dashboard.
+    (1.5 . slide) (0.8 . "b") (1.2 . "h") (2.5 . "h")
+    (1.0 . slide) (0.8 . "i") (1.2 . "h") (2.5 . "i") (1.5 . "h")
+    (1.0 . slide) (0.8 . "u") (1.2 . "h") (2.5 . "u") (1.5 . "h")
+    (1.0 . slide) (0.8 . "s") (1.2 . "h") (2.5 . "s")
     (2.5 . slide) (0.8 . "?") (2.0 . "j") (0.3 . "j") (0.3 . "j") (0.3 . "j")
     (1.5 . slide) (0.8 . "/") ,@(demo-typed "climate" 0.15)
     (0.8 . "\r") (2.0 . "n") (2.0 . "q")

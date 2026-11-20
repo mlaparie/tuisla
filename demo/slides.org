@@ -16,25 +16,22 @@ Keys and current settings.
 
 Toggles take effect right away.
 
+* Help: refresh rate  =+ -=
+Refresh interval in 5 s steps, shown in help.
+
 * Help: colors  =b=
 Off by default; =-c= starts with colors.
 
-* Help: invert  =i=
-Inverted screen.
+Seen on the dashboard.
 
-* Help: refresh rate  =+ -=
-Refresh interval in 5 s steps.
+* Help: invert  =i=
+Inverted screen, seen on the dashboard, then back.
 
 * Help: units  =u=
-Metric or US units, seen on the dashboard.
+Metric or US units, seen on the dashboard, then back.
 
 * Help: style  =s=
-Fancy or minimal style.
-
-* Back to dashboard  =h=
-US units and minimal style.
-
-Then =s= and =u= switch back.
+Fancy or minimal style, seen on the dashboard, then back.
 
 * Command list  =?=
 Every command, by category.
