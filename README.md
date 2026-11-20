@@ -21,9 +21,19 @@ and `MYTESLAMATE_TOKEN` override them; `TESLA_VIN` picks a vehicle.
 
 - `mtm` (default): commands go through the [MyTeslaMate API](https://www.myteslamate.com/api/).
   You don't need a MyTeslaMate (hosted TeslaMate) instance, only their API,
-  which is cheaper: pay-as-you-go credits, one per command. In their app, open
-  the API tab (<https://app.myteslamate.com/fleet>), allow commands for your
-  vehicle and copy the MyTeslaMate API token.
+  which is cheaper. It is pay-as-you-go, priced by usage but usually cheap:
+
+  | Usage | Credits |
+  |---|---|
+  | 1 command, 150 streaming signals or 300 API calls | 1 |
+  | 1 vehicle data request | 2 |
+  | 1 wake-up | 20 |
+
+  1€ (excl. tax) buys 500 credits. tuisla only sends commands through
+  MyTeslaMate (data and wake-ups go to Tesla), so 1€ is about 500 commands.
+
+  In their app, open the API tab (<https://app.myteslamate.com/fleet>), allow
+  commands for your vehicle and copy the MyTeslaMate API token.
 - `ro`: read-only, commands disabled.
 - `vc`: Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command)
   proxy. Experimental: it needs a Fleet API app and a paired key.
