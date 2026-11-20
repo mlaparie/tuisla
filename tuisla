@@ -2,18 +2,36 @@
 # =============================================================================
 #  tuisla — A Tesla TUI
 #
-#  USAGE:  python3 tuisla [--mode MODE] [--unit UNIT] [--invert] [--simple] [--bw]
-#          python3 tuisla --login     (sign in, print a TESLA_REFRESH_TOKEN)
+#  USAGE:  python3 tuisla [--mode MODE] [--unit UNIT] [--refresh S] [--invert]
+#                         [--simple] [--bw]
+#          python3 tuisla --login [--print]
 #
-#  MODES:  ro (read-only, default) | mtm (myteslamate) | vc (vehicle-command)
-#  UNITS:  metric | us
+#  LOGIN:  --login signs in to Tesla in the browser and saves a refresh token
+#          to $XDG_STATE_HOME/tuisla/refresh_token (~/.local/state/...), mode
+#          600.  tuisla keeps that file up to date when Tesla rotates the token.
+#          --print writes the token to stdout instead of saving it.
+#
+#  MODES:  Vehicle data is always read from the Tesla Owner API; the mode only
+#          decides where commands go.
+#    ro    Read-only (default); commands are disabled.
+#    mtm   Commands go to MyTeslaMate (api.myteslamate.com) using
+#          MYTESLAMATE_TOKEN.  The Tesla token is not sent to them.
+#    vc    Commands go to a local tesla-http-proxy (teslamotors/vehicle-command)
+#          at VEHICLE_COMMAND_URL.  NOTE: the proxy expects a Fleet API token
+#          from a registered Tesla developer app and a key paired with the car;
+#          the Owner API token tuisla uses will most likely be rejected.
+#
+#  UNITS:  metric | us (temperatures typed in commands follow the unit)
 #
 #  ENV:
-#    TESLA_REFRESH_TOKEN    Required for live mode. If missing, runs demo mode.
-#    TESLA_VIN              Optional. Pin to a specific vehicle (needed for vc).
-#    MYTESLAMATE_TOKEN      Required for --mode mtm.
+#    TESLA_REFRESH_TOKEN    Optional. Used instead of the saved token if set.
+#                           Without any token tuisla runs in demo mode.
+#    TESLA_VIN              Optional. Pin to a specific vehicle; by default the
+#                           first vehicle on the account is used.
+#    MYTESLAMATE_TOKEN      Required for mtm.
 #    VEHICLE_COMMAND_URL    Default: https://localhost:4443
-#    VEHICLE_COMMAND_CERT   Default: cert.pem
+#    VEHICLE_COMMAND_CERT   CA file for the proxy's TLS cert. Default: cert.pem
+#                           (relative to the current directory)
 # =============================================================================
 
 from __future__ import annotations
@@ -37,7 +55,7 @@ import time
 import urllib.parse
 import urllib.request
 import webbrowser
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 OWNER_API = "https://owner-api.teslamotors.com/api/1"
 AUTH_URL  = "https://auth.tesla.com/oauth2/v3/token"
@@ -93,16 +111,17 @@ DEMO_DATA = {
 #  Command registry
 #  (display_name, endpoint, fixed_body_or_None, help_text)
 #
-#  display_name may contain <arg> placeholders.  For each placeholder the
-#  matching positional word typed by the user is injected into the body dict.
-#  Placeholder names must match the corresponding body key, e.g.
-#      "charge limit <percent>"  ->  body key "percent"
+#  display_name may contain <arg> placeholders, filled from the words typed
+#  after the command.  A body value "<arg>" is replaced by that argument, e.g.
+#      "charge limit <percent>"  with  {"percent": "<percent>"}
+#  A None body value means "keep the car's current setting" (set_temps only).
+#  Temperatures are entered in the display unit (°F with -u us) and sent in °C.
 # =============================================================================
 CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     # ── Security ────────────────────────────────────────────────────────────
     ("sentry on",               "set_sentry_mode",                  {"on": True},                               "Enable Sentry Mode"),
     ("sentry off",              "set_sentry_mode",                  {"on": False},                              "Disable Sentry Mode"),
-    ("valet on <password>",     "set_valet_mode",                   {"on": True,  "password": None},            "Enable valet mode (e.g. valet on 1234)"),
+    ("valet on <password>",     "set_valet_mode",                   {"on": True,  "password": "<password>"},            "Enable valet mode (e.g. valet on 1234)"),
     ("valet off",               "set_valet_mode",                   {"on": False, "password": ""},              "Disable valet mode"),
     ("honk",                    "honk_horn",                        None,                                       "Honk the horn"),
     ("flash",                   "flash_lights",                     None,                                       "Flash the lights"),
@@ -117,26 +136,26 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     # ── Charging ────────────────────────────────────────────────────────────
     ("charge start",            "charge_start",                     None,                                       "Start charging"),
     ("charge stop",             "charge_stop",                      None,                                       "Stop charging"),
-    ("charge limit <percent>",  "set_charge_limit",                 {"percent": None},                          "Set charge limit % (e.g. charge limit 80)"),
-    ("charge amps <charging_amps>", "set_charging_amps",            {"charging_amps": None},                    "Set charging amps (e.g. charge amps 16)"),
+    ("charge limit <percent>",  "set_charge_limit",                 {"percent": "<percent>"},                   "Set charge limit % (e.g. charge limit 80)"),
+    ("charge amps <charging_amps>", "set_charging_amps",            {"charging_amps": "<charging_amps>"},       "Set charging amps (e.g. charge amps 16)"),
     ("port open",               "charge_port_door_open",            None,                                       "Open the charge port"),
     ("port close",              "charge_port_door_close",           None,                                       "Close the charge port"),
     # ── Climate ─────────────────────────────────────────────────────────────
     ("climate on",              "auto_conditioning_start",          None,                                       "Turn climate on"),
     ("climate off",             "auto_conditioning_stop",           None,                                       "Turn climate off"),
-    ("temp <temp>",             "set_temps",                        {"driver_temp": None, "passenger_temp": 0}, "Set both seats temp C (e.g. temp 21)"),
-    ("temp_driver <temp>",   "set_temps",                           {"driver_temp": None, "passenger_temp": 0}, "Set driver temp C only (e.g. driver temp 21)"),
-    ("temp_passenger <temp>", "set_temps",                          {"driver_temp": 0, "passenger_temp": None}, "Set passenger temp C only (e.g. passenger temp 19)"),
+    ("temp <temp>",             "set_temps",                        {"driver_temp": "<temp>", "passenger_temp": "<temp>"}, "Set both seats temp (e.g. temp 21)"),
+    ("temp_driver <temp>",      "set_temps",                        {"driver_temp": "<temp>", "passenger_temp": None},     "Set driver temp only (e.g. temp_driver 21)"),
+    ("temp_passenger <temp>",   "set_temps",                        {"driver_temp": None, "passenger_temp": "<temp>"},     "Set passenger temp only (e.g. temp_passenger 19)"),
     ("defrost on",              "set_preconditioning_max",          {"on": True},                               "Enable max defrost/preconditioning"),
     ("defrost off",             "set_preconditioning_max",          {"on": False},                              "Disable max defrost/preconditioning"),
-    ("seat heat <seat> <level>","remote_seat_heater_request",       {"heater": None, "level": None},            "Seat heat: seat 0-4, level 0-3 (e.g. seat heat 0 2)"),
+    ("seat heat <seat> <level>","remote_seat_heater_request",       {"seat_position": "<seat>", "level": "<level>"}, "Seat heat: seat 0-4, level 0-3 (e.g. seat heat 0 2)"),
     ("steering heat on",        "remote_steering_wheel_heater_request", {"on": True},                           "Steering wheel heater on"),
     ("steering heat off",       "remote_steering_wheel_heater_request", {"on": False},                          "Steering wheel heater off"),
     # ── Settings ────────────────────────────────────────────────────────────
-    ("speed limit on <pin>",    "speed_limit_activate",             {"pin": None},                              "Activate speed limit (e.g. speed limit on 1234)"),
-    ("speed limit off <pin>",   "speed_limit_deactivate",           {"pin": None},                              "Deactivate speed limit (e.g. speed limit off 1234)"),
-    ("speed limit set <limit_mph>", "speed_limit_set_limit",        {"limit_mph": None},                        "Set speed limit mph 50-90"),
-    ("speed limit clear <pin>", "speed_limit_clear_pin",            {"pin": None},                              "Clear speed limit PIN"),
+    ("speed limit on <pin>",    "speed_limit_activate",             {"pin": "<pin>"},                            "Activate speed limit (e.g. speed limit on 1234)"),
+    ("speed limit off <pin>",   "speed_limit_deactivate",           {"pin": "<pin>"},                            "Deactivate speed limit (e.g. speed limit off 1234)"),
+    ("speed limit set <limit_mph>", "speed_limit_set_limit",        {"limit_mph": "<limit_mph>"},               "Set speed limit mph 50-90"),
+    ("speed limit clear <pin>", "speed_limit_clear_pin",            {"pin": "<pin>"},                            "Clear speed limit PIN"),
     ("sunroof vent",            "sun_roof_control",                 {"state": "vent"},                          "Vent the sunroof"),
     ("sunroof close",           "sun_roof_control",                 {"state": "close"},                         "Close the sunroof"),
     # ── Media ────────────────────────────────────────────────────────────────
@@ -151,12 +170,12 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("update cancel",           "cancel_software_update",           None,                                       "Cancel a pending software update"),
 ]
 
-# Build keyword->(endpoint, body_template, help) lookup.
+# Build keyword->(endpoint, body_template, help, placeholder names) lookup.
 # Key is the static prefix of the display_name (before any <placeholder>).
-_CMD_LOOKUP: Dict[str, Tuple[str, Optional[Dict[str, Any]], str]] = {}
+_CMD_LOOKUP: Dict[str, Tuple[str, Optional[Dict[str, Any]], str, List[str]]] = {}
 for _name, _ep, _body, _help in CMD_REGISTRY:
     _key = re.split(r"\s+<", _name)[0]
-    _CMD_LOOKUP[_key] = (_ep, _body, _help)
+    _CMD_LOOKUP[_key] = (_ep, _body, _help, re.findall(r"<(\w+)>", _name))
 
 # Static key names used for tab-completion (no <placeholders>).
 CMD_KEYS: List[str] = list(_CMD_LOOKUP.keys())
@@ -432,7 +451,47 @@ def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0)
 
 
 # =============================================================================
-#  Login (OAuth2 PKCE) -- prints a refresh token for TESLA_REFRESH_TOKEN
+#  Refresh token storage
+#  Tesla may hand out a new refresh token on every refresh, so the latest one
+#  is kept in $XDG_STATE_HOME/tuisla/refresh_token (mode 600, dir 700).
+# =============================================================================
+
+def token_path() -> str:
+    base = os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state")
+    return os.path.join(base, "tuisla", "refresh_token")
+
+
+def load_token() -> str:
+    path = token_path()
+    try:
+        info = os.stat(path)
+    except FileNotFoundError:
+        return ""
+    if info.st_mode & 0o077 or info.st_uid != os.getuid():
+        die(f"Refusing to use {path}: it must be owned by you and not readable by "
+            f"others (chmod 600 {path})")
+    with open(path, encoding="utf-8") as f:
+        return f.read().strip()
+
+
+def save_token(token: str) -> None:
+    path = token_path()
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    # mkstemp creates the file with mode 600; rename it over the old one so a
+    # crash never leaves a half-written token behind.
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".refresh_token.")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(token + "\n")
+        os.replace(tmp, path)
+    except BaseException:
+        try: os.remove(tmp)
+        except OSError: pass
+        raise
+
+
+# =============================================================================
+#  Login (OAuth2 PKCE) -- stores a refresh token (see token_path)
 # =============================================================================
 
 def _b64url(raw: bytes) -> str:
@@ -536,9 +595,8 @@ class _CallbackCatcher:
             except Exception: pass
 
 
-def login() -> int:
-    # Prompts go to stderr so stdout carries only the token, e.g.:
-    #   set -Ux TESLA_REFRESH_TOKEN (python3 tuisla --login)
+def login(print_token: bool = False) -> int:
+    # Prompts go to stderr so that with --print stdout carries only the token.
     def say(msg: str = "") -> None:
         print(msg, file=sys.stderr, flush=True)
 
@@ -644,8 +702,18 @@ def login() -> int:
     if not rt:
         say("X Token exchange failed (missing refresh_token)")
         return 1
-    say("\nOK. Refresh token (keep it secret):\n")
-    print(rt, flush=True)
+    if print_token:
+        say("\nOK. Refresh token (keep it secret):\n")
+        print(rt, flush=True)
+        return 0
+    try:
+        save_token(rt)
+    except OSError as e:
+        say(f"X Could not save the token to {token_path()}: {e}")
+        return 1
+    say(f"\nOK. Saved to {token_path()} -- just run tuisla now.")
+    if os.environ.get("TESLA_REFRESH_TOKEN"):
+        say("! TESLA_REFRESH_TOKEN is set and is tried first; unset it to use the saved token.")
     return 0
 
 
@@ -654,9 +722,11 @@ def login() -> int:
 # =============================================================================
 
 class TeslaClient:
-    def __init__(self, refresh_token: str) -> None:
+    def __init__(self, refresh_token: str,
+                 on_rotate: Optional[Callable[[str], None]] = None) -> None:
         self.refresh_token = refresh_token
         self.access_token  = ""
+        self.on_rotate     = on_rotate     # called with each new refresh token
 
     def _http(self, req: urllib.request.Request,
               ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
@@ -689,6 +759,8 @@ class TeslaClient:
         new_rt = resp.get("refresh_token") or ""
         if new_rt and new_rt != self.refresh_token:
             self.refresh_token = new_rt
+            if self.on_rotate:
+                self.on_rotate(new_rt)
 
     def api_get(self, path: str) -> Dict[str, Any]:
         req = urllib.request.Request(
@@ -702,16 +774,15 @@ class TeslaClient:
         return self._http(req)
 
     def api_post(self, url: str, body: Optional[Dict[str, Any]] = None,
-                 ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
+                 ctx: Optional[ssl.SSLContext] = None, auth: bool = True) -> Dict[str, Any]:
         payload = json.dumps(body).encode("utf-8") if body else b""
-        req = urllib.request.Request(
-            url, method="POST", data=payload,
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Content-Type":  "application/json",
-                "User-Agent":    "tuisla/1.0",
-            },
-        )
+        headers = {
+            "Content-Type":  "application/json",
+            "User-Agent":    "tuisla/1.0",
+        }
+        if auth:
+            headers["Authorization"] = f"Bearer {self.access_token}"
+        req = urllib.request.Request(url, method="POST", data=payload, headers=headers)
         return self._http(req, ctx=ctx)
 
     def get_vehicle_id_and_vin(self, target_vin: str) -> Tuple[str, str]:
@@ -794,18 +865,26 @@ def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
                 f"/{urllib.parse.quote(st.target_vin)}/command/{ep}"
                 f"?token={urllib.parse.quote(st.myteslamate_token)}"
             )
-            resp = client.api_post(url, body)
+            # MyTeslaMate authenticates with its own token; don't send ours.
+            resp = client.api_post(url, body, auth=False)
         elif st.mode == "vc":
             if not st.target_vin:
                 msg    = "X TESLA_VIN required for vc"
-                result = "h help    {c.RED}{msg}{c.R}"
+                result = f"h help    {c.RED}{msg}{c.R}"
                 log_cmd(ep, msg)
                 return result
             cafile = st.vehicle_command_cert or "cert.pem"
             ctx    = ssl.create_default_context(cafile=cafile)
             base   = st.vehicle_command_url.rstrip("/")
             url    = f"{base}/api/1/vehicles/{urllib.parse.quote(st.target_vin)}/command/{ep}"
-            resp   = client.api_post(url, body, ctx=ctx)
+            try:
+                resp = client.api_post(url, body, ctx=ctx)
+            except RuntimeError as e:
+                if not str(e).startswith("HTTP 401"):
+                    raise
+                # Access token expired since the last data fetch; renew once.
+                client.refresh_access_token()
+                resp = client.api_post(url, body, ctx=ctx)
     except Exception as e:
         msg    = f"X {str(e)[:180]}"
         result = f"h help    {c.RED}{msg}{c.R}"
@@ -813,7 +892,8 @@ def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
         return result
 
     ok     = bool(jget(resp, "response.result", False))
-    reason = str(jget(resp, "response.reason", "") or jget(resp, "error", "") or "failed")
+    reason = str(jget(resp, "response.reason", "") or jget(resp, "response.string", "")
+                 or jget(resp, "error", "") or "failed")
     msg    = (f"✓ {label}") if ok else (f"X {reason}")
     result = f"h help    {c.GRN if ok else c.RED}{msg}{c.R}"
     log_cmd(ep, msg)
@@ -970,15 +1050,17 @@ def parse_and_run_cmd(term: Term, c: Colors, client: TeslaClient,
     best_key: Optional[str]              = None
     best_ep:  Optional[str]              = None
     best_tpl: Optional[Dict[str, Any]]   = None
+    best_args: List[str]                 = []
     best_len: int                        = -1
 
-    for key, (ep, tpl, _help) in _CMD_LOOKUP.items():
+    for key, (ep, tpl, _help, arg_names) in _CMD_LOOKUP.items():
         key_tokens = key.split()
         n = len(key_tokens)
         if tokens[:n] == key_tokens and n > best_len:
             best_key  = key
             best_ep   = ep
             best_tpl  = tpl
+            best_args = arg_names
             best_len  = n
 
     if best_key is None or best_ep is None:
@@ -986,30 +1068,47 @@ def parse_and_run_cmd(term: Term, c: Colors, client: TeslaClient,
         log_cmd(raw, result)
         return result
 
+    def fail(msg: str) -> str:
+        result = f"h help    {c.RED}X {msg}{c.R}"
+        log_cmd(best_ep or raw, result)
+        return result
+
     arg_tokens = tokens[best_len:]
+    if len(arg_tokens) < len(best_args):
+        return fail(f"missing argument <{best_args[len(arg_tokens)]}> for '{best_key}'")
+
+    args: Dict[str, Any] = {}
+    for name, raw_val in zip(best_args, arg_tokens):
+        if name in ("pin", "password"):      # keep leading zeros
+            args[name] = raw_val
+            continue
+        try:
+            args[name] = int(raw_val)
+        except ValueError:
+            try:
+                args[name] = float(raw_val)
+            except ValueError:
+                args[name] = raw_val
 
     body: Optional[Dict[str, Any]] = None
     if best_tpl is not None:
-        body    = dict(best_tpl)
-        arg_idx = 0
-        for k, v in body.items():
-            if v is None:
-                if arg_idx >= len(arg_tokens):
-                    result = f"h help    {c.RED}X missing argument for '{best_key}'{c.R}"
-                    log_cmd(best_ep, result)
-                    return result
-                raw_val = arg_tokens[arg_idx]
-                arg_idx += 1
-                try:
-                    body[k] = int(raw_val)
-                except ValueError:
-                    try:
-                        body[k] = float(raw_val)
-                    except ValueError:
-                        body[k] = raw_val
-        if best_ep == "set_temps" and "driver_temp" in body:
-            if body.get("passenger_temp") == 0 and body["driver_temp"] != 0:
-                body["passenger_temp"] = body["driver_temp"]
+        body = {}
+        for k, v in best_tpl.items():
+            m = re.fullmatch(r"<(\w+)>", v) if isinstance(v, str) else None
+            body[k] = args[m.group(1)] if m else v
+
+    if best_ep == "set_temps" and body is not None:
+        for k in ("driver_temp", "passenger_temp"):
+            if body[k] is None:
+                # set_temps needs both seats; keep the other one as it is now
+                cur = jget(st.last_data or {}, f"response.climate_state.{k}_setting", None)
+                if cur is None:
+                    return fail(f"current {k.split('_')[0]} temp unknown -- use 'temp'")
+                body[k] = float(cur)
+            elif not isinstance(body[k], (int, float)):
+                return fail(f"temperature must be a number, got '{body[k]}'")
+            elif st.unit == "us" and best_tpl and best_tpl[k] is not None:
+                body[k] = round((body[k] - 32) * 5 / 9, 1)
 
     label = best_key[0].upper() + best_key[1:]
     return run_cmd(client, st, best_ep, label, body, c)
@@ -1033,6 +1132,7 @@ class State:
     myteslamate_token: str = ""
     vehicle_command_url: str = "https://localhost:4443"
     vehicle_command_cert: str = "cert.pem"
+    last_data: Optional[Dict[str, Any]] = None   # last vehicle_data shown, for set_temps
 
 
 # =============================================================================
@@ -1399,6 +1499,7 @@ def show_log_pager(term: Term, c: Colors) -> None:
 # =============================================================================
 
 def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> None:
+    st.last_data = data
     term_w, _ = term.get_size()
     lbl_w, val_w = 9, 20
     col_w    = 2 + lbl_w + val_w
@@ -1424,7 +1525,10 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     chg_mins   = int(float(jget(data, "response.charge_state.minutes_to_full_charge", 0) or 0))
     chg_kw     = int(float(jget(data, "response.charge_state.charger_power", 0) or 0))
     chg_volts  = int(float(jget(data, "response.charge_state.charger_voltage", 0) or 0))
-    chg_current= int(float(jget(data, "response.charge_state.charge_amps", 0) or 0))
+    chg_current= jget(data, "response.charge_state.charge_actual_current", None)
+    if chg_current is None:
+        chg_current = jget(data, "response.charge_state.charge_amps", 0)
+    chg_current= int(float(chg_current or 0))
     chg_added  = float(jget(data, "response.charge_state.charge_energy_added", 0) or 0)
     bat_heat   = bool(jget(data, "response.charge_state.battery_heater_on", False))
     draw       = int(float(jget(data, "response.drive_state.power", 0) or 0))
@@ -1688,11 +1792,13 @@ def main() -> int:
     ap.add_argument("-s", "--simple",  action="store_true", help="Disable fancy style")
     ap.add_argument("-b", "--bw",      action="store_true", help="Disable colors")
     ap.add_argument("--login",         action="store_true",
-                    help="Sign in to Tesla and print a refresh token, then exit")
+                    help="Sign in to Tesla, save a refresh token, then exit")
+    ap.add_argument("--print",         action="store_true",
+                    help="With --login: print the token instead of saving it")
     args = ap.parse_args()
 
     if args.login:
-        return login()
+        return login(print_token=args.print)
 
     st = State(
         mode=args.mode,
@@ -1704,7 +1810,10 @@ def main() -> int:
         vehicle_command_cert=os.environ.get("VEHICLE_COMMAND_CERT", "cert.pem") or "cert.pem",
     )
 
-    refresh_token = os.environ.get("TESLA_REFRESH_TOKEN", "") or ""
+    # TESLA_REFRESH_TOKEN wins if set; the saved token is the fallback.
+    env_token   = os.environ.get("TESLA_REFRESH_TOKEN", "") or ""
+    saved_token = load_token()
+    refresh_token = env_token or saved_token
     c = Colors(fancy=(not args.simple), inverted=bool(args.invert), bw=bool(args.bw))
 
     term   = Term()
@@ -1726,6 +1835,7 @@ def main() -> int:
             try: fn()
             except Exception: pass
 
+    err = ""
     try:
         # DEMO MODE
         if not refresh_token:
@@ -1741,10 +1851,24 @@ def main() -> int:
                 _   = handle_key(term, c, st, None, "", key)
 
         # LIVE MODE
-        client = TeslaClient(refresh_token)
+        def keep_token(new_rt: str) -> None:
+            try:
+                save_token(new_rt)
+            except OSError as e:
+                log_cmd("token", f"X could not save refresh token: {e}")
+
+        client = TeslaClient(refresh_token, on_rotate=keep_token)
         term.home(); term.clear_to_end()
         term.write("Authenticating…\n")
-        client.refresh_access_token()
+        try:
+            client.refresh_access_token()
+        except RuntimeError:
+            # An env token goes stale once Tesla rotates it; the saved one is newer.
+            if not (env_token and saved_token and saved_token != env_token):
+                raise
+            term.write("TESLA_REFRESH_TOKEN rejected, trying the saved token…\n")
+            client.refresh_token = saved_token
+            client.refresh_access_token()
         term.write("Looking up vehicle…\n")
         vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
 
@@ -1753,7 +1877,7 @@ def main() -> int:
 
         term.write(f"Connected: {st.target_vin or '?VIN?'} (vid {vid}) [{st.mode}]\n")
         if not vid:
-            die("No vehicle found -- check TESLA_VIN or token")
+            raise RuntimeError("No vehicle found -- check TESLA_VIN or token")
 
         time.sleep(0.5)
 
@@ -1831,8 +1955,16 @@ def main() -> int:
 
     except KeyboardInterrupt:
         return 0
+    except RuntimeError as e:
+        err = str(e)
     finally:
         cleanup()
+
+    # Only startup errors get here; the main loop retries on its own.
+    print(f"tuisla: {err}", file=sys.stderr)
+    if err.startswith(("HTTP 400", "HTTP 401", "Token refresh failed")):
+        print("tuisla: the refresh token looks invalid -- run: tuisla --login", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":
