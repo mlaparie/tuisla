@@ -264,10 +264,20 @@ class Colors:
         self.YLW = self._base["YLW"]; self.BLU = self._base["BLU"]
         self.MAG = self._base["MAG"]; self.CYN = self._base["CYN"]
         self.GRY = self._base["GRY"]
+        if self.inverted:
+            # Darker shades that stay readable on the light inverted background.
+            self.YLW = "\x1b[38;5;136m"; self.GRN = "\x1b[38;5;28m"
+            self.CYN = "\x1b[38;5;30m"
         if self.bw:
             self.RED = ""; self.GRN = ""; self.YLW = ""
             self.BLU = ""; self.MAG = ""; self.CYN = ""
             self.GRY = "\x1b[90m"
+
+
+# Inverted screen: dark text on a light background.  Drawn by tuisla itself
+# rather than with the terminal's screen-reverse mode (ESC [?5h), which tmux,
+# eat and others ignore.  Erasing also uses this background in those terminals.
+INVERT_SGR = "\x1b[30;107m"
 
 
 class Term:
@@ -275,8 +285,12 @@ class Term:
         self.is_windows = (os.name == "nt")
         self._raw_enabled = False
         self._old_termios = None
+        self.inverted = False
 
     def write(self, s: str) -> None:
+        if self.inverted:
+            # Every color reset falls back to the inverted colors.
+            s = s.replace("\x1b[0m", "\x1b[0m" + INVERT_SGR)
         sys.stdout.write(s)
         sys.stdout.flush()
 
@@ -295,7 +309,8 @@ class Term:
         self.write("\x1b[?25h" if on else "\x1b[?25l")
 
     def invert_screen(self, on: bool) -> None:
-        self.write("\x1b[?5h" if on else "\x1b[?5l")
+        self.inverted = on
+        self.write("\x1b[0m")       # applies (or drops) INVERT_SGR; the next redraw fills the screen
 
     def home(self) -> None:
         self.write("\x1b[H")
@@ -1788,6 +1803,7 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
 
     if key == "i":
         c.inverted = not c.inverted
+        c.apply_bw()
         term.invert_screen(c.inverted)
         return False
 
