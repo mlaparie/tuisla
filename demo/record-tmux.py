@@ -6,7 +6,7 @@ mode, from a temporary copy (so it logs there and sees no tokens).
 
 Usage: demo/record-tmux.py [OUT.cast]      (default: demo/tuisla.cast)
 Needs: tmux, python3.  Make a GIF with: agg demo/tuisla.cast demo/tuisla.gif"""
-import fcntl, json, os, pty, select, shlex, shutil, struct, subprocess, sys
+import codecs, fcntl, json, os, pty, select, shlex, shutil, struct, subprocess, sys
 import tempfile, termios, time
 
 HERE      = os.path.dirname(os.path.abspath(__file__))
@@ -77,6 +77,7 @@ def main() -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
     start, events = time.time(), []
+    utf8 = codecs.getincrementaldecoder("utf-8")("replace")   # chars may span reads
 
     def pump(seconds: float) -> None:
         end = time.time() + seconds
@@ -90,14 +91,14 @@ def main() -> None:
                 return
             if not data:
                 return
-            events.append([time.time() - start, "o", data.decode("utf-8", "replace")])
+            events.append([time.time() - start, "o", utf8.decode(data)])
 
     try:
         pump(1.0)
         fifo = open(fifo_p, "w", buffering=1)      # captions.py has opened its end by now
         tmux("split-window", "-h", "-t", "demo:0", "-l", str(COLS - CAPTION_W - 1), tuisla_cmd)
-        tmux("select-pane", "-t", "demo:0.0", "-T", "Table of contents")
-        tmux("select-pane", "-t", "demo:0.1", "-T", "tuisla, the app")
+        tmux("select-pane", "-t", "demo:0.0", "-T", "Animation table of content:")
+        tmux("select-pane", "-t", "demo:0.1", "-T", "tuisla demo below:")
         fifo.write("0\n")
         pump(2.0)
         t0 = time.time() - start                  # both panes drawn: the cast starts here

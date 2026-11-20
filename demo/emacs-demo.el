@@ -62,7 +62,7 @@
   ;; Left: the slides.  Right: tuisla in eat.
   (find-file (getenv "DEMO_ORG"))
   (setq demo-org-win (selected-window))
-  (setq header-line-format '(:propertize " Slides " face (:inverse-video t :weight bold)))
+  (setq header-line-format '(:propertize " Animation table of content: " face (:inverse-video t :weight bold)))
   (visual-line-mode 1)                  ; wrap long slide lines
   (org-present)
   ;; org-present starts just before the first heading; this lands on the
@@ -75,7 +75,7 @@
     (setq demo-eat-buf (window-buffer right))
     (with-current-buffer demo-eat-buf
       (setq header-line-format
-            '(:propertize " tuisla, the app " face (:inverse-video t :weight bold)))))
+            '(:propertize " tuisla demo below: " face (:inverse-video t :weight bold)))))
   (message nil)
   ;; Title slide for 3 s, then the timeline.
   (run-at-time 3 nil #'demo-run demo-steps))

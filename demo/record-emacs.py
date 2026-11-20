@@ -6,7 +6,7 @@ read-only mode, from a temporary copy (so it logs there and sees no tokens).
 
 Usage: demo/record-emacs.py [OUT.cast]     (default: demo/tuisla-emacs.cast)
 Needs: emacs with org-present and eat, python3."""
-import fcntl, json, os, pty, select, shutil, signal, struct, sys, tempfile, termios, time
+import codecs, fcntl, json, os, pty, select, shutil, signal, struct, sys, tempfile, termios, time
 
 HERE       = os.path.dirname(os.path.abspath(__file__))
 OUT        = os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "tuisla-emacs.cast"))
@@ -31,6 +31,7 @@ def main() -> None:
     fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
 
     start, events = time.time(), []
+    utf8 = codecs.getincrementaldecoder("utf-8")("replace")   # chars may span reads
     try:
         while time.time() - start < TIMEOUT:
             r, _, _ = select.select([fd], [], [], 0.5)
@@ -44,7 +45,7 @@ def main() -> None:
                 break
             if not data:
                 break
-            events.append([time.time() - start, "o", data.decode("utf-8", "replace")])
+            events.append([time.time() - start, "o", utf8.decode(data)])
         else:
             os.kill(pid, signal.SIGTERM)
             sys.exit("timed out")
