@@ -18,7 +18,9 @@
 #
 #  MODES:  Vehicle data is always read from the Tesla Owner API; the mode only
 #          decides where commands go.
-#    ro    Read-only; commands are disabled.
+#    ro    Read-only: commands are checked but not sent (dry run).  A valid
+#          command shows "✓ ... (ro: not sent)"; malformed ones still fail.
+#          Demo mode (no Tesla token) dry-runs commands the same way.
 #    mtm   (default) Commands go to MyTeslaMate (api.myteslamate.com) using the
 #          MyTeslaMate token.  The Tesla token is not sent to them.
 #    vc    Commands go to a local tesla-http-proxy (teslamotors/vehicle-command)
@@ -924,11 +926,14 @@ def log_cmd(ep: str, result: str) -> None:
 #  Command execution
 # =============================================================================
 
-def run_cmd(client: TeslaClient, st: "State", ep: str, label: str,
+def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
             body: Optional[Dict[str, Any]], c: Colors) -> str:
-    if st.mode == "ro":
-        msg    = "X commands disabled in ro mode (press m)"
-        result = f"h help    {c.RED}{msg}{c.R}"
+    # Dry run in ro mode and in demo mode (no token): the command was parsed
+    # and validated, but nothing is sent to the car.
+    if st.mode == "ro" or client is None:
+        why    = "ro" if st.mode == "ro" else "demo"
+        msg    = f"✓ {label} ({why}: not sent)"
+        result = f"h help    {c.GRN}{msg}{c.R}"
         log_cmd(ep, msg)
         return result
 
@@ -1113,7 +1118,7 @@ def prompt_command(term: Term, c: Colors, st: "State") -> Optional[str]:
     return None
 
 
-def parse_and_run_cmd(term: Term, c: Colors, client: TeslaClient,
+def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
                       st: "State") -> str:
     """
     Prompt -> parse -> dispatch to run_cmd.
@@ -1253,9 +1258,8 @@ def render_help(term: Term, c: Colors, st: State) -> None:
 
     frame.maxvis = max(frame.maxvis, cmd_frame.maxvis)
 
-    if st.mode != "ro":
-        for s in cmd_frame.lines:
-            frame.fline(s)
+    for s in cmd_frame.lines:
+        frame.fline(s)
 
     frame.blank()
     frame.row2(c, "mode:",    f"{c.GRY}{st.mode}{c.R}",
@@ -1825,17 +1829,6 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
     # Command hotkeys -- only when neither overlay is open
     cmd_keys = {"H", "f", "L", "l", "C", "c", "p", "P", "o", ":"}
     if (not st.show_help) and (not st.show_cmd_pager) and (key in cmd_keys):
-        if client is None:
-            msg    = "X TESLA_REFRESH_TOKEN missing"
-            st.cmd_msg = f"h help    {c.RED}{msg}{c.R}"
-            log_cmd(key, msg)
-            return False
-        if st.mode == "ro":
-            msg    = "X no commands in ro mode (press m)"
-            st.cmd_msg = f"h help    {c.RED}{msg}{c.R}"
-            log_cmd(key, msg)
-            return False
-
         if key == "H":
             st.cmd_msg = run_cmd(client, st, "honk_horn",              "NOOT NOOT!",      None, c)
         elif key == "f":
