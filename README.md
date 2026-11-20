@@ -4,7 +4,8 @@ A Tesla dashboard for the terminal: battery, charging, climate, tyres and
 locks at a glance, plus remote commands. One Python file, no dependencies
 beyond Python 3 and `curl` (with HTTP/2).
 
-Demo (ro mode, built-in demo data): `asciinema play demo.cast`
+Demo (ro mode, built-in demo data, features captioned on the left):
+`asciinema play demo.cast`
 
 ## Quick start
 
@@ -34,7 +35,7 @@ and `MYTESLAMATE_TOKEN` override them; `TESLA_VIN` picks a vehicle.
 
   In their app, open the API tab (<https://app.myteslamate.com/fleet>), allow
   commands for your vehicle and copy the MyTeslaMate API token.
-- `ro`: read-only, commands disabled.
+- `ro`: read-only. Commands are checked but not sent (dry run).
 - `vc`: Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command)
   proxy. Experimental: it needs a Fleet API app and a paired key.
 
