@@ -54,7 +54,11 @@ def main() -> None:
                 "set -g escape-time 0\n"
                 "set -g default-terminal screen-256color\n"
                 "set -g pane-border-style fg=colour8\n"
-                "set -g pane-active-border-style fg=colour8\n")
+                "set -g pane-active-border-style fg=colour8\n"
+                # Title bar on each pane, so it's clear which one is the app.
+                "set -g pane-border-status top\n"
+                "set -g pane-border-format '#[reverse,bold] #{pane_title} #[default]'\n"
+                "set -g allow-set-title off\n")
 
     env = {k: v for k, v in os.environ.items()
            if k not in ("TMUX", "TESLA_REFRESH_TOKEN", "MYTESLAMATE_TOKEN", "TESLA_VIN")}
@@ -92,6 +96,8 @@ def main() -> None:
         pump(1.0)
         fifo = open(fifo_p, "w", buffering=1)      # captions.py has opened its end by now
         tmux("split-window", "-h", "-t", "demo:0", "-l", str(COLS - CAPTION_W - 1), tuisla_cmd)
+        tmux("select-pane", "-t", "demo:0.0", "-T", "Table of contents")
+        tmux("select-pane", "-t", "demo:0.1", "-T", "tuisla, the app")
         fifo.write("0\n")
         pump(2.0)
         t0 = time.time() - start                  # both panes drawn: the cast starts here
