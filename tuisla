@@ -562,11 +562,10 @@ def flush_frame(term: Term, c: Colors, frame: Frame) -> int:
     return v_margin + len(frame.lines) - 1
 
 
-def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0) -> str:
+def two_col_title(content_w: int, left: str, right: str) -> str:
     half        = content_w // 2
-    right_start = half - shift_left
     lvis        = vlen(left)
-    gap         = max(2, right_start - lvis)
+    gap         = max(2, half - lvis)
     return f"{left}{' ' * gap}{right}"
 
 
@@ -2527,11 +2526,12 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
 
     mode_c = c.GRN if st.mode in ("mtm", "vc") else c.GRY
 
-    px_bat = "\u26a1 " if c.fancy else ""
-    px_clm = "\U0001f321 " if c.fancy else ""
-    px_drv = "\U0001f697 " if c.fancy else ""
-    px_sec = "\U0001f6e1 " if c.fancy else ""
-    px_nav = "\U0001f9ed " if c.fancy else ""
+    # One-column monochrome symbols, so titles keep their space in any font.
+    px_bat = "⌁ " if c.fancy else ""
+    px_clm = "❄ " if c.fancy else ""
+    px_drv = "◎ " if c.fancy else ""
+    px_sec = "⊡ " if c.fancy else ""
+    px_nav = "⌖ " if c.fancy else ""
 
     frame.blank()
     frame.cat_labels = False
@@ -2544,8 +2544,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     frame.row2(c, f"{c.GRY}[{vin}]{c.R}", f"{c.GRY}v{sw}{c.R}{upd}",
                f"{c.GRY}{ts}{c.R}", "")
 
-    frame.section(c, two_col_title(content_w, f"{px_bat}ENERGY", f"{px_clm}THERMAL",
-                                   shift_left=(1 if c.fancy else 0)))
+    frame.section(c, two_col_title(content_w, f"{px_bat}ENERGY", f"{px_clm}THERMAL"))
     frame.cat_labels = True
 
     added = f"{c.GRN}+{chg_added:g} kWh{c.R}" if chg_state != "disconnected" else ""
@@ -2559,8 +2558,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
                       "Battery", "")
         frame.row2(c, "End in", fmt_time_hhmm(chg_mins), " heater", f"{bat_c}{bat_l}{c.R}")
 
-    frame.section(c, two_col_title(content_w, f"{px_drv}WHEELS", f"{px_sec}PARKING",
-                                   shift_left=(1 if c.fancy else 0)))
+    frame.section(c, two_col_title(content_w, f"{px_drv}WHEELS", f"{px_sec}PARKING"))
     def tyre(v: float) -> str:
         return f"{v:.2f} {press_u}" if st.unit == "metric" else f"{int(v)} {press_u}"
     frame.row2(c, "F left",  tyre(fl), "Status", f"{lk_c}{lk_l}{c.R}")
