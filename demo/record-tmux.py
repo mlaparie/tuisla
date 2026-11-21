@@ -84,7 +84,7 @@ def main() -> None:
         subprocess.run(["tmux", "-L", SOCK, *args], check=True)
 
     caption_cmd = f"python3 -B {shlex.quote(os.path.join(HERE, 'captions.py'))} {shlex.quote(fifo_p)}"
-    tuisla_cmd  = f"python3 -B {shlex.quote(tuisla)} -m ro"
+    tuisla_cmd  = f"python3 -B {shlex.quote(tuisla)} -m ro -b"   # starts in black and white; b turns the colours on
 
     pid, fd = pty.fork()
     if pid == 0:

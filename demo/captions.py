@@ -8,7 +8,7 @@ STEPS = [
     ("Dashboard",           "",      "Battery, charging, climate, tyres, locks and the current route at a glance. Refreshes every 5 s."),
     ("Help",                "h",     "Keys and current settings. Toggles take effect right away:"),
     ("  Refresh rate",      "+ -",   "Refresh interval in 5 s steps, shown in help."),
-    ("  Colors",            "b",     "Off by default; -c starts with colors. Seen on the dashboard."),
+    ("  Colors",            "b",     "On by default; -b starts without. Seen on the dashboard."),
     ("  Invert",            "i",     "Inverted screen, seen on the dashboard, then back."),
     ("  Units",             "u",     "Metric or US units, seen on the dashboard, then back."),
     ("  Style",             "s",     "Fancy or minimal style, seen on the dashboard, then back."),
