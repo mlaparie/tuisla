@@ -1327,6 +1327,13 @@ def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
         return send_cmd(client, st, ep, label, body, c)
     def job() -> None:
         st.cmd_msg, st.cmd_msg_at = send_cmd(client, st, ep, label, body, c), 0.0
+        if ep.startswith("navigation_") and "✓" in st.cmd_msg:
+            # The Owner API data has no route: ask for it once, when the car has it.
+            def route() -> None:
+                fetch_route(client, st)
+                if st.redraw:
+                    st.redraw()
+            threading.Timer(ROUTE_DELAY, route).start()
     st.pending += 1
     st.jobs.put(job)
     return f"h help    {c.YLW}… {label}{c.R}"
@@ -1652,7 +1659,7 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
     return run_cmd(client, st, best_ep, label, body, c)
 
 
-ROUTE_EVERY = 300                # s between route updates through the Fleet API while one is set
+ROUTE_DELAY = 8                  # s for the car to compute a route sent to it
 
 
 def fetch_route(client: TeslaClient, st: "State") -> None:
@@ -1660,7 +1667,6 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
     for it: through MyTeslaMate in mtm mode, through our own app in vc mode."""
     path = (f"/vehicles/{urllib.parse.quote(st.target_vin)}/vehicle_data?endpoints="
             + urllib.parse.quote("location_data"))
-    st.route_at = time.time()
     try:
         if st.mode == "mtm" and st.myteslamate_token:
             try:
@@ -1680,6 +1686,9 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
     ds = jget(resp, "response.drive_state", {}) or {}
     st.route = {k: v for k, v in ds.items() if k.startswith("active_route_")} \
         if ds.get("active_route_destination") else {}
+    log_cmd("route", f"✓ {st.route['active_route_destination']}" if st.route else
+            "no route in the Fleet API data; drive_state has: " + (", ".join(sorted(ds)) or
+                                                                   f"nothing ({str(resp)[:120]})"))
 
 
 def route_fields(st: "State", data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -2109,10 +2118,10 @@ class State:
     data_at: float = 0.0         # when last_data was fetched
     route_until: float = 0.0     # ask for the location (and route) until then
     route: Dict[str, Any] = dataclasses.field(default_factory=dict)  # active_route_* from fetch_route
-    route_at: float = 0.0        # when fetch_route last ran
     watch_until: float = 0.0     # fetch data until then even if the car may sleep (after a command)
     status: str = ""             # shown on the message line while nothing else is
     jobs: Any = None             # queue of commands sent in the background (live mode)
+    redraw: Optional[Callable[[], None]] = None  # asks the main loop to redraw
     pending: int = 0             # commands queued or being sent
     let_sleep: bool = True       # only poll the state while the car is idle, so it can sleep
     charger_range_km: Optional[float] = None     # chargers range in km; None: the car's range
@@ -2987,6 +2996,7 @@ def main() -> int:
             st.cmd_msg = f"h help    {c.YLW}{msg}{c.R}"
             dirty.set()
         st.notify = notify
+        st.redraw = dirty.set
 
         if not st.target_vin and vin:
             st.target_vin = vin
@@ -3072,12 +3082,6 @@ def main() -> int:
                         data = {"response": {"vin": st.target_vin}}
                     data["response"]["state"] = "waking"
             st.last_data = data
-            now = time.time()
-            in_data = jget(data or {}, "response.drive_state.active_route_destination")
-            if (data and data["response"].get("state") == "online" and not in_data
-                    and (now < st.route_until and not st.route and now - st.route_at > 10
-                         or st.route and now - st.route_at > ROUTE_EVERY)):
-                fetch_route(client, st)
             dirty.set()
 
         def fetch_loop() -> None:
