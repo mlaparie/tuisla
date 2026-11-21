@@ -5,7 +5,7 @@ a step number, "key NAME", or "end"."""
 import collections, os, signal, sys, textwrap
 
 STEPS = [
-    ("Dashboard",           "",      "Battery, charging, climate, tyres and locks at a glance. Refreshes every 5 s."),
+    ("Dashboard",           "",      "Battery, charging, climate, tyres, locks and the current route at a glance. Refreshes every 5 s."),
     ("Help",                "h",     "Keys and current settings. Toggles take effect right away:"),
     ("  Refresh rate",      "+ -",   "Refresh interval in 5 s steps, shown in help."),
     ("  Colors",            "b",     "Off by default; -c starts with colors. Seen on the dashboard."),
@@ -17,9 +17,13 @@ STEPS = [
     ("Type a command",      ":",     "Tab completes, e.g. charge limit 80, temp 22. In read-only mode commands are checked but not sent."),
     ("Hotkeys",             "H",     "One-key commands, e.g. H honks (not sent in read-only mode)."),
     ("Command log",         "z",     "Every command and its result is logged."),
-    ("Modes",               "m",     "ro -> mtm (MyTeslaMate API) -> vc (vehicle-command, WIP)."),
+    ("Chargers",            ":",     "Nearby chargers; j/k pick one, Enter sends it to the car as the destination."),
+    ("Terminal map",        ":",     "mapscii chargers: the car and the chargers on a map in the terminal (mapscii)."),
+    ("  Globe view",        "o",     "mapscii globe, then o: the same markers on a 3D globe; arrows rotate it, q goes back."),
+    ("Sleep",               "w",     "The car may sleep when idle (default); w keeps it awake."),
+    ("Modes",               "m",     "ro -> mtm (MyTeslaMate API) -> vc (own key, via vehicle-command)."),
 ]
-KEY_NAMES = {"Enter": "⏎", "Tab": "Tab", " ": "␣"}
+KEY_NAMES = {"Enter": "⏎", "Tab": "Tab", " ": "␣", "Left": "←"}
 
 B, DIM, REV, CYN, R = "\x1b[1m", "\x1b[2m", "\x1b[7m", "\x1b[36m", "\x1b[0m"
 

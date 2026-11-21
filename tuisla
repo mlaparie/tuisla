@@ -57,6 +57,7 @@ import datetime as _dt
 import getpass
 import hashlib
 import json
+import math
 import os
 import re
 import secrets
@@ -122,7 +123,7 @@ DEMO_DATA = {
         },
         "drive_state": {"power": 2, "shift_state": None, "speed": None, "timestamp": 1771692668445,
                         "latitude": 37.4925, "longitude": -121.9447,
-                        "active_route_destination": "Monterey, CA",
+                        "active_route_destination": "Springfield",
                         "active_route_miles_to_arrival": 71.3, "active_route_minutes_to_arrival": 84,
                         "active_route_energy_at_arrival": 41, "active_route_traffic_minutes_delay": 6},
     }
@@ -130,9 +131,9 @@ DEMO_DATA = {
 
 DEMO_CHARGERS = {
     "superchargers": [
-        {"name": "Fremont, CA", "distance_miles": 1.2, "available_stalls": 9, "total_stalls": 20,
+        {"name": "Springfield Supercharger", "distance_miles": 1.2, "available_stalls": 9, "total_stalls": 20,
          "location": {"lat": 37.5087, "long": -121.9615}},
-        {"name": "Milpitas, CA", "distance_miles": 4.8, "available_stalls": 0, "total_stalls": 12,
+        {"name": "Shelbyville Supercharger", "distance_miles": 4.8, "available_stalls": 0, "total_stalls": 12,
          "location": {"lat": 37.4153, "long": -121.8970}},
     ],
     "destination_charging": [
@@ -240,8 +241,9 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     # ── Info (read only; nothing is sent to the car) ─────────────────────────
     ("map",                     "_map",                             None,                                       "Open the car's location on a map in the browser"),
     ("map chargers",            "_map_chargers",                    None,                                       "Open the car and nearby chargers on a map in the browser"),
-    ("maptui",                  "_maptui",                          None,                                       "Show the car on a map in the terminal (mapscii)"),
-    ("maptui chargers",         "_maptui_chargers",                 None,                                       "Show the car and nearby chargers in the terminal (mapscii)"),
+    ("mapscii",                 "_mapscii",                         None,                                       "Show the car on a map in the terminal (mapscii)"),
+    ("mapscii chargers",        "_mapscii_chargers",                None,                                       "Show the car and nearby chargers in the terminal (mapscii)"),
+    ("mapscii globe",           "_mapscii_globe",                   None,                                       "The same, zoomed out to the whole Earth; press o for a 3D globe"),
     ("chargers",                "_chargers",                        None,                                       "List nearby chargers; Enter sends one to the car"),
     ("route",                   "_route",                           None,                                       "Show the destination, arrival time and energy"),
 ]
@@ -1590,7 +1592,7 @@ def mapscii_command() -> List[str]:
         return [node, bundle]
     for tool in ("git", "node", "npm", "npx"):
         if not shutil.which(tool):
-            raise RuntimeError(f"maptui needs {tool} (git and Node.js 18+) to fetch mapscii")
+            raise RuntimeError(f"mapscii needs {tool} (git and Node.js 18+) to fetch mapscii")
     print(f"Fetching mapscii (pull request 161) into {cache}; only this once…", flush=True)
     steps = [["git", "init", "-q"],
              ["git", "fetch", "-q", "--depth", "1", MAPSCII_REPO, MAPSCII_COMMIT],
@@ -1655,17 +1657,50 @@ m.fitBounds(pts.map(p => [p[1], p[2]]), {padding: [30, 30], maxZoom: 15});
 </script>"""
 
 
-def run_mapscii(term: Term, c: Colors, lat: float, lon: float, zoom: int,
-                geojson: str = "") -> str:
-    """Show the map in mapscii, in place of the dashboard until it quits."""
-    term.disable_raw(); term.invert_screen(False); term.alt_screen(False); term.cursor(True)
+_MARKERS = {"car": ("◯", "#ff3030"), "superchargers": ("■", "#ffaa00"),
+            "destination_charging": ("▮", "#00ccff")}
+
+
+def fit_zoom(points: List[Tuple[str, float, float, str]], cols: int, rows: int) -> Tuple[float, float, float]:
+    """Center and mapscii zoom that show all the points (with room for labels).
+    mapscii draws the world 256 * 2**zoom braille dots wide, 2x4 per cell."""
+    lats = [p[1] for p in points]
+    lons = [p[2] for p in points]
+    def merc(lat: float) -> float:   # Web Mercator y, 0..1 for the whole world
+        lat = max(-85.0, min(85.0, lat))
+        return (1 - math.log(math.tan(math.radians(lat)) + 1 / math.cos(math.radians(lat))) / math.pi) / 2
+    dx = max(max(lons) - min(lons), 1e-4) / 360
+    dy = max(abs(merc(max(lats)) - merc(min(lats))), 1e-4)
+    zoom = min(math.log2(cols * 2 * 0.6 / (256 * dx)),       # labels need room on the right
+               math.log2((rows - 2) * 4 * 0.8 / (256 * dy)))
+    return ((max(lats) + min(lats)) / 2, (max(lons) + min(lons)) / 2, max(1.0, min(16.0, round(zoom, 1))))
+
+
+def run_mapscii(term: Term, c: Colors, points: List[Tuple[str, float, float, str]],
+                zoom: Optional[float]) -> str:
+    """Show the points in mapscii, in place of the dashboard until it quits:
+    around the first one at that zoom, or all of them if zoom is None.  It
+    draws on tuisla's screen, which is cleared afterwards, so no map is left
+    in the terminal."""
+    lat, lon = points[0][1], points[0][2]
+    if zoom is None:
+        lat, lon, zoom = fit_zoom(points, *term.get_size())
+    path = cache_file("markers.geojson")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({"type": "FeatureCollection", "features": [
+            {"type": "Feature", "geometry": {"type": "Point", "coordinates": [plon, plat]},
+             "properties": {"label": name, "glyph": _MARKERS[kind][0], "color": _MARKERS[kind][1]}}
+            for kind, plat, plon, name in points]}, f)
+    term.disable_raw(); term.invert_screen(False); term.home(); term.clear_to_end(); term.cursor(True)
     try:
-        cmd = mapscii_command() + ["--lat", str(lat), "--lon", str(lon), "--zoom", str(zoom)]
-        subprocess.run(cmd + (["--geojson", geojson] if geojson else ["--marker", f"{lat},{lon}"]))
+        subprocess.run(mapscii_command() + ["--lat", str(lat), "--lon", str(lon),
+                                            "--zoom", str(zoom), "--geojson", path])
     except (OSError, RuntimeError) as e:
         return f"h help    {c.RED}X {str(e)[:180]}{c.R}"
     finally:
-        term.alt_screen(True); term.cursor(False); term.invert_screen(c.inverted); term.enable_raw()
+        term.write("\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[0m")   # mapscii's mouse modes off
+        term.home(); term.clear_to_end()
+        term.cursor(False); term.invert_screen(c.inverted); term.enable_raw()
     return ""
 
 
@@ -1701,8 +1736,9 @@ def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         return f"h help    {c.GRN}✓ Route: {route}{c.R}" if route else f"h help    {c.GRY}No active route{c.R}"
 
     lat, lon = car_location(client, st)
-    if ep == "_maptui":
-        return run_mapscii(term, c, lat, lon, 15) if lat is not None else fail("car location unknown")
+    car = ("car", lat, lon, str(jget(st.last_data or {}, "response.vehicle_state.vehicle_name", "") or "car"))
+    if ep == "_mapscii":
+        return run_mapscii(term, c, [car], 15) if lat is not None else fail("car location unknown")
     if ep == "_map":
         if lat is None:
             return fail("car location unknown")
@@ -1726,19 +1762,11 @@ def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
 
     points = charger_points(sites)
     if lat is not None:
-        points.insert(0, ("car", lat, lon, "car"))
+        points.insert(0, car)
     if not points:
         return fail("no locations to show")
-    if ep == "_maptui_chargers":
-        glyphs = {"car": ("●", "#ff0000"), "superchargers": ("◆", "#ff8800"),
-                  "destination_charging": ("◆", "#0088ff")}
-        path = cache_file("chargers.geojson")
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"type": "FeatureCollection", "features": [
-                {"type": "Feature", "geometry": {"type": "Point", "coordinates": [plon, plat]},
-                 "properties": {"label": name, "glyph": glyphs[kind][0], "color": glyphs[kind][1]}}
-                for kind, plat, plon, name in points]}, f)
-        return run_mapscii(term, c, points[0][1], points[0][2], 12, path)
+    if ep in ("_mapscii_chargers", "_mapscii_globe"):
+        return run_mapscii(term, c, points, None if ep == "_mapscii_chargers" else 0)
     path = cache_file("map.html")
     with open(path, "w", encoding="utf-8") as f:
         f.write(_MAP_HTML.replace("__POINTS__", json.dumps(points)))
@@ -2505,7 +2533,7 @@ def main() -> int:
                     help="Refresh interval in s (default: 5)")
     ap.add_argument("-i", "--invert",  action="store_true")
     ap.add_argument("-w", "--keep-awake", action="store_true",
-                    help="Keep the car awake instead of letting it sleep when idle (w toggles)")
+                    help="Keep the car awake instead of letting it sleep when idle")
     ap.add_argument("-s", "--simple",  action="store_true", help="Disable fancy style")
     ap.add_argument("-c", "--color",   action="store_true", help="Enable colors (default: off)")
     ap.add_argument("-b", "--bw",      action="store_true", help=argparse.SUPPRESS)  # now the default
@@ -2650,7 +2678,10 @@ def main() -> int:
                 except Exception:
                     state = "unknown"
                 new = None
-                if state == "online" and (forced or data is None or car_busy(data)):
+                # Also right after sending a destination: the car takes a
+                # moment to compute the route.
+                if state == "online" and (forced or data is None or car_busy(data)
+                                          or time.time() < st.route_until):
                     try:
                         new = client.get_vehicle_data(vid, wants_location(st))
                     except Exception:

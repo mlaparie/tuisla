@@ -1,8 +1,9 @@
 # tuisla
 
 A TUI to check on and control your Tesla from the comfort of your terminal:
-battery, charging, climate, tyres and locks at a glance, and commands like
-lock, climate or charge limit from the keyboard.
+battery, charging, climate, tyres, locks and the current route at a glance,
+commands like lock, climate or charge limit from the keyboard, and nearby
+chargers on a map in the terminal, one key away from being the destination.
 
 It runs on Linux, macOS or even Android (Termux).
 
@@ -41,15 +42,17 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car.
 
 - `--mode mtm` (default, recommended), commands are sent to the car through the MyTeslaMate API.
 - `--mode ro` (read-only), commands are checked for validity, but not sent.
-- `--mode vc`, commands are signed by tuisla itself with your own key, through Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy, and sent with your own Tesla developer app instead of MyTeslaMate. Run `./tuisla --setup-vc` once (it runs `tuisla-setup-vc`, which must sit next to `tuisla`): it walks you through every step (keys, publishing the public key on a free GitHub Pages site, the Tesla developer app, adding the key to the car from the Tesla app) and checks each one. You need [Go](https://go.dev/) to install the proxy, `openssl`, and a payment card on the Tesla developer site; Tesla's $10 monthly credit covers a personal car. Once set up, vc mode also works without `--login-tesla`, but vehicle data then comes from the billed Fleet API, so tuisla refreshes every 60 s at most.
+- `--mode vc`, commands are signed by tuisla itself with your own key, through Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy, and sent with your own Tesla developer app instead of MyTeslaMate. Run `./tuisla --setup-vc` once (it runs `tuisla-setup-vc`, which must sit next to `tuisla`): it walks you through every step (keys, publishing the public key on a free GitHub Pages site, the Tesla developer app, adding the key to the car from the Tesla app) and checks each one. It needs `openssl`, plus [Go](https://go.dev/) and git to build the proxy: on Guix or Nix it runs them in a temporary `guix shell` / `nix-shell`, elsewhere it offers to install them with your package manager (apt, dnf, pacman, zypper, apk, Homebrew or Termux) and to remove them again at the end, or you can install them yourself. You also need a payment card on the Tesla developer site; Tesla's $10 monthly credit covers a personal car. Once set up, vc mode also works without `--login-tesla`, but vehicle data then comes from the billed Fleet API, so tuisla refreshes every 60 s at most.
 
 See `./tuisla --help` for more options.
+
+[FILES.org](FILES.org) lists the files tuisla keeps (tokens, keys, caches) and which ones are needed.
 
 ## Commands
 
 Press `?` for the full list. Besides the usual lock, climate and charging commands, there are seat heating and cooling (`seat heat driver 2`), climate keeper and dog mode (`keeper dog`), cabin overheat protection, Guest Mode, PIN to Drive, speed limit, renaming the car, sending a destination (`navigate 1 Main St, Springfield` or `navigate gps 37.49 -121.94`), Homelink, waking the car, and:
 
-- `map` / `maptui`: the car's location on OpenStreetMap in the browser, or in the terminal with [mapscii](https://github.com/rastapasta/mapscii) (its version with start coordinates is still [a pull request](https://github.com/rastapasta/mapscii/pull/161), which tuisla fetches and builds on first use with git and Node.js; on Guix: `guix install node git`). `map chargers` and `maptui chargers` add the nearby chargers.
+- `map` / `mapscii`: the car's location on OpenStreetMap in the browser, or in the terminal with [mapscii](https://github.com/rastapasta/mapscii) (its version with start coordinates is still [a pull request](https://github.com/rastapasta/mapscii/pull/161), which tuisla fetches and builds on first use with git and Node.js; on Guix: `guix install node git`). `map chargers` and `mapscii chargers` add the nearby chargers (◯ the car, ■ Superchargers, ▮ destination chargers, all fitted on screen), and `mapscii globe` shows them on the whole Earth: press `o` there for a 3D globe. Quitting the map leaves nothing behind in the terminal.
 - `chargers`: nearby Superchargers with free stalls and destination chargers; pick one with `j`/`k` and press Enter to send it to the car as the destination.
 - `route`: the destination, distance, arrival time and battery left at arrival. While a route is active the dashboard shows it too.
 
@@ -59,4 +62,4 @@ Not possible: Sentry Mode and dashcam clips are only stored on the car's USB dri
 
 ## Credits
 
-`maptui` runs [MapSCII](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which adds start coordinates and markers. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
+`mapscii` runs [MapSCII](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.

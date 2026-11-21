@@ -16,9 +16,11 @@ import importlib.util
 import json
 import os
 import secrets
+import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.parse
 import urllib.request
@@ -40,7 +42,11 @@ from tuisla import (AUTHORIZE_URL, FLEET_REGIONS, FLEET_TOKEN_FILE, FLEET_TOKEN_
 FLEET_SCOPES     = "openid offline_access vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds"
 PUBKEY_PATH      = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
 CALLBACK_PAGE    = "tuisla-callback.html"
-PROXY_REPO       = "github.com/teslamotors/vehicle-command/cmd/tesla-http-proxy"
+# go install …@latest refuses this module (its go.mod has replace directives),
+# so it is built from a clone.
+PROXY_REPO       = "https://github.com/teslamotors/vehicle-command.git"
+PROXY_BUILD      = (f"git clone --depth 1 {PROXY_REPO} vehicle-command &&\n"
+                    "       go -C vehicle-command install ./cmd/tesla-http-proxy")
 
 _CALLBACK_HTML = """<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -52,6 +58,42 @@ _CALLBACK_HTML = """<!doctype html>
 <p><button onclick="navigator.clipboard.writeText(location.href);this.textContent='Copied'">Copy</button></p>
 <script>document.getElementById('u').value = location.href</script>
 """
+
+
+# Package managers that can install openssl and Go for the setup, and remove
+# them afterwards: (name, its command, install, remove, {tool: package}).
+_SUDO = [] if os.name != "posix" or os.geteuid() == 0 else ["sudo"]
+_PKG_MANAGERS = [
+    ("apt",    "apt-get", _SUDO + ["apt-get", "install", "-y"], _SUDO + ["apt-get", "remove", "-y"],
+     {"openssl": "openssl", "go": "golang-go", "git": "git"}),
+    ("dnf",    "dnf",     _SUDO + ["dnf", "install", "-y"],     _SUDO + ["dnf", "remove", "-y"],
+     {"openssl": "openssl", "go": "golang", "git": "git"}),
+    ("pacman", "pacman",  _SUDO + ["pacman", "-S", "--needed", "--noconfirm"], _SUDO + ["pacman", "-Rns", "--noconfirm"],
+     {"openssl": "openssl", "go": "go", "git": "git"}),
+    ("zypper", "zypper",  _SUDO + ["zypper", "install", "-y"],  _SUDO + ["zypper", "remove", "-y"],
+     {"openssl": "openssl", "go": "go", "git": "git"}),
+    ("apk",    "apk",     _SUDO + ["apk", "add"],               _SUDO + ["apk", "del"],
+     {"openssl": "openssl", "go": "go", "git": "git"}),
+    ("brew",   "brew",    ["brew", "install"],                  ["brew", "uninstall"],
+     {"openssl": "openssl", "go": "go", "git": "git"}),
+]
+_TERMUX = ("pkg", "pkg", ["pkg", "install", "-y"], ["pkg", "uninstall", "-y"],
+           {"openssl": "openssl-tool", "go": "golang", "git": "git"})
+
+
+def tool_source() -> str:
+    """guix or nix (tools then run in a temporary shell), else the name of the
+    package manager to install them with, else ""."""
+    if os.environ.get("TERMUX_VERSION"):
+        return "pkg"
+    for name in ("guix", "nix-shell"):
+        if shutil.which(name):
+            return name.split("-")[0]
+    return next((m[0] for m in _PKG_MANAGERS if shutil.which(m[1])), "")
+
+
+def pkg_manager(name: str) -> tuple:
+    return _TERMUX if name == "pkg" else next(m for m in _PKG_MANAGERS if m[0] == name)
 
 
 def setup_vc() -> int:
@@ -85,8 +127,21 @@ def setup_vc() -> int:
             secret = getpass.getpass("Client Secret (hidden, from the same page): ").strip()
         return secret
 
+    shelled: List[str] = []      # tools run through guix shell or nix-shell
+    source = ""
+
+    def tool(cmd: List[str]) -> List[str]:
+        if cmd[0] not in shelled:
+            return cmd
+        if source == "guix":
+            return ["guix", "shell", *shelled, "--", *cmd]
+        return ["nix-shell", "-p", *shelled, "--run", shlex.join(cmd)]
+
+    def have(name: str) -> bool:
+        return bool(shutil.which(name)) or name in shelled
+
     def run(cmd: List[str]) -> bool:
-        out = subprocess.run(cmd, capture_output=True, text=True)
+        out = subprocess.run(tool(cmd), capture_output=True, text=True)
         if out.returncode != 0:
             print(f"X {' '.join(cmd[:2])} failed: {out.stderr.strip()[:300]}")
         return out.returncode == 0
@@ -103,7 +158,22 @@ def setup_vc() -> int:
     try:
         # ── 1. Tools ───────────────────────────────────────────────────────
         step(1, "tools")
-        if not shutil.which("openssl"):
+        need = [t for t in ("openssl", "go", "git")
+                if not shutil.which(t) and (t == "openssl" or not find_proxy())]
+        source = tool_source() if need else ""
+        if need and source in ("guix", "nix"):
+            via = "guix shell" if source == "guix" else "nix-shell"
+            if yes(f"{' and '.join(need)} missing: use them through {via}, without installing them?"):
+                shelled = need
+        elif need and source:
+            name, _, install, _, names = pkg_manager(source)
+            pkgs = [names[t] for t in need]
+            if yes(f"{' and '.join(need)} missing: install them with `{' '.join(install + pkgs)}`?\n"
+                   "  (you can remove them again at the end)"):
+                if subprocess.run(install + pkgs).returncode == 0:
+                    cfg["installed"] = {"manager": name, "pkgs": pkgs, "tools": need}
+                    save()
+        if not have("openssl"):
             print("X openssl is needed to make the keys. Install it, then run this again:\n"
                   "    Debian/Ubuntu: sudo apt install openssl     Fedora: sudo dnf install openssl\n"
                   "    Arch: sudo pacman -S openssl                Guix: guix install openssl\n"
@@ -112,19 +182,22 @@ def setup_vc() -> int:
         print("✓ openssl")
         if find_proxy():
             print(f"✓ tesla-http-proxy ({find_proxy()})")
-        elif shutil.which("go"):
+        elif have("go") and have("git"):
             print("tesla-http-proxy (Tesla's command signer) is not installed.")
-            if yes(f"Install it now with: go install {PROXY_REPO}@latest ?"):
+            if yes("Build it now from Tesla's vehicle-command repository?"):
                 print("Building (a minute or two)…")
-                if run(["go", "install", f"{PROXY_REPO}@latest"]) and find_proxy():
-                    print(f"✓ tesla-http-proxy ({find_proxy()})")
+                with tempfile.TemporaryDirectory() as tmp:
+                    src = os.path.join(tmp, "vehicle-command")
+                    if (run(["git", "clone", "-q", "--depth", "1", PROXY_REPO, src])
+                            and run(["go", "-C", src, "install", "./cmd/tesla-http-proxy"]) and find_proxy()):
+                        print(f"✓ tesla-http-proxy ({find_proxy()})")
         if not find_proxy():
             print("! tesla-http-proxy is missing; it is only needed at the very end, so you\n"
-                  "  can carry on and install it meanwhile.  It is built with Go:\n"
-                  "    1. Install Go:  Debian/Ubuntu: sudo apt install golang   Fedora: sudo dnf install golang\n"
-                  "                    Arch: sudo pacman -S go   Guix: guix install go   macOS: brew install go\n"
-                  "                    Termux: pkg install golang\n"
-                  f"    2. Run:  go install {PROXY_REPO}@latest")
+                  "  can carry on and install it meanwhile.  It is built with Go and git:\n"
+                  "    1. Install them:  Debian/Ubuntu: sudo apt install golang git   Fedora: sudo dnf install golang git\n"
+                  "                      Arch: sudo pacman -S go git   Guix: guix install go git\n"
+                  "                      macOS: brew install go git   Termux: pkg install golang git\n"
+                  f"    2. Run:  {PROXY_BUILD}")
 
         # ── 2. Keys ────────────────────────────────────────────────────────
         step(2, "keys")
@@ -398,6 +471,18 @@ you to tap your key card on the console; do it.""")
                 print(f"X {api_error(e)}  (the car may be asleep: try again in tuisla)")
             finally:
                 vc.stop()
+        # What step 1 added is only needed for the setup: tesla-http-proxy is
+        # a standalone program, and the keys are made.
+        ours = "go" in shelled or "go" in cfg.get("installed", {}).get("tools", [])
+        if ours and find_proxy() and yes("Delete Go's download and build caches (about 200 MB)?"):
+            run(["go", "clean", "-cache", "-modcache"])
+        if cfg.get("installed"):
+            name, _, _, remove, _ = pkg_manager(cfg["installed"]["manager"])
+            pkgs = cfg["installed"]["pkgs"]
+            if yes(f"Remove {' '.join(pkgs)}, installed for this setup (`{' '.join(remove + pkgs)}`)?"):
+                if subprocess.run(remove + pkgs).returncode == 0:
+                    del cfg["installed"]
+                    save()
         print("\nAll set.  Start tuisla in vc mode with:  tuisla -m vc")
         return 0
     except (KeyboardInterrupt, EOFError):

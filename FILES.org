@@ -1,0 +1,37 @@
+#+title: Files tuisla keeps
+
+* State: =~/.local/state/tuisla/=
+
+Or =$XDG_STATE_HOME/tuisla/= when that is set.  Tokens and keys; keep this
+folder private.
+
+| File                                | What it is                                              | Needed?                                 |
+|-------------------------------------+---------------------------------------------------------+-----------------------------------------|
+| =refresh_token=                     | Your Tesla sign-in, from =--login-tesla=                | Yes                                     |
+| =myteslamate_token=                 | MyTeslaMate API token, from =--login-mtm=               | For mtm mode                            |
+| =access_token=                      | Cached Tesla access token, so starting skips a renewal  | No; deleted, it comes back              |
+| =vc.json=                           | vc mode settings (developer app, domain, region, car)   | For vc mode                             |
+| =fleet_refresh_token=               | Fleet API sign-in, from =--setup-vc=                    | For vc mode                             |
+| =fleet_access_token=                | Cached Fleet API access token                           | No; deleted, it comes back              |
+| =vc/private.pem=                    | The command key your car trusts                         | For vc mode; losing it means re-pairing |
+| =vc/public.pem=                     | Its public half, published on your website              | For vc mode                             |
+| =vc/tls-key.pem=, =vc/tls-cert.pem= | Local TLS for Tesla's command signer (tesla-http-proxy) | For vc mode                             |
+| =vc/proxy.log=                      | Log of the command signer                               | No                                      |
+| =vc/site/=                          | Files to publish for the key                            | No, once they are on your website       |
+
+* Cache: =~/.cache/tuisla/=
+
+Or =$XDG_CACHE_HOME/tuisla/=.  Everything here can be deleted; tuisla
+remakes it when needed.
+
+| File                | What it is                                                  |
+|---------------------+-------------------------------------------------------------|
+| =mapscii-0032cabb/= | mapscii (pull request 161), fetched and built for =mapscii= |
+| =markers.geojson=   | The car and chargers last shown in mapscii                  |
+| =map.html=          | The map last opened by =map chargers=                       |
+
+* Next to tuisla
+
+| File         | What it is                                       |
+|--------------+--------------------------------------------------|
+| =tuisla.log= | Every command sent and its result (=z= shows it) |
