@@ -1660,13 +1660,31 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
 
 
 ROUTE_DELAY = 8                  # s for the car to compute a route sent to it
+ROUTE_ENDPOINTS = ("charge_state;climate_state;closures_state;drive_state;gui_settings;"
+                   "location_data;vehicle_config;vehicle_state")
+ROUTE_DUMP_FILE = "route_debug.json"
+
+
+def route_keys(obj: Any, path: str = "") -> List[str]:
+    """Paths of the keys that look like a route, anywhere in the data."""
+    found: List[str] = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            p = f"{path}.{k}" if path else k
+            if re.search(r"route|dest|nav|arriv|trip|eta", k, re.I):
+                found.append(p)
+            found += route_keys(v, p)
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            found += route_keys(v, f"{path}[{i}]")
+    return found
 
 
 def fetch_route(client: TeslaClient, st: "State") -> None:
     """The Owner API data has no route (active_route_*), so ask the Fleet API
     for it: through MyTeslaMate in mtm mode, through our own app in vc mode."""
     path = (f"/vehicles/{urllib.parse.quote(st.target_vin)}/vehicle_data?endpoints="
-            + urllib.parse.quote("location_data"))
+            + urllib.parse.quote(ROUTE_ENDPOINTS))
     try:
         if st.mode == "mtm" and st.myteslamate_token:
             try:
@@ -1683,6 +1701,15 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
     except Exception as e:
         log_cmd("route", f"X {api_error(e)[:150]}")
         return
+    try:   # whole answer, to look for the route under another name
+        dump = token_path(ROUTE_DUMP_FILE)
+        os.makedirs(os.path.dirname(dump), mode=0o700, exist_ok=True)
+        with open(os.open(dump, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
+            json.dump(resp, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+    log_cmd("route", "route-like keys: " + (", ".join(route_keys(resp)) or "none")
+            + f" (whole answer in {token_path(ROUTE_DUMP_FILE)})")
     ds = jget(resp, "response.drive_state", {}) or {}
     st.route = {k: v for k, v in ds.items() if k.startswith("active_route_")} \
         if ds.get("active_route_destination") else {}
