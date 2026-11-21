@@ -233,6 +233,7 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("wake",                    "wake_up",                          None,                                       "Wake the car up"),
     # ── Info (read only; nothing is sent to the car) ─────────────────────────
     ("map",                     "_map",                             None,                                       "Open the car's location on a map in the browser"),
+    ("maptui",                  "_maptui",                          None,                                       "Show the car on a map in the terminal (mapscii)"),
     ("chargers",                "_chargers",                        None,                                       "List nearby Superchargers and destination chargers"),
 ]
 
@@ -500,6 +501,8 @@ class Frame:
         self.fline(f"  {c.B}{c.MAG}{title}{c.R}")
 
 
+MSG_SECONDS = 3                  # a command's result stays at least this long
+
 _MIN_TERM_W = 64
 _MIN_TERM_H = 21
 _TOO_SMALL_MSG_W = "Window too narrow: 64x21 required"
@@ -548,6 +551,8 @@ def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0)
 #    refresh_token       Tesla may hand out a new one on every refresh, so the
 #                        latest one is kept here.
 #    myteslamate_token   Copied by the user from the MyTeslaMate dashboard.
+#    access_token        The last access token (valid ~8 h), so that starting
+#                        again soon skips a round trip to auth.tesla.com.
 # =============================================================================
 
 MTM_TOKEN_FILE = "myteslamate_token"
@@ -912,7 +917,8 @@ class TeslaClient:
     def __init__(self, refresh_token: str,
                  on_rotate: Optional[Callable[[str], None]] = None, *,
                  api_base: str = OWNER_API, client_id: str = OWNER_CLIENT_ID,
-                 token_url: str = AUTH_URL, scope: str = "openid email offline_access") -> None:
+                 token_url: str = AUTH_URL, scope: str = "openid email offline_access",
+                 cache: str = "") -> None:
         self.refresh_token = refresh_token
         self.access_token  = ""
         self.on_rotate     = on_rotate     # called with each new refresh token
@@ -920,6 +926,7 @@ class TeslaClient:
         self.client_id     = client_id
         self.token_url     = token_url
         self.scope         = scope
+        self.cache         = cache         # token file keeping the access token between runs
 
     def _http(self, req: urllib.request.Request,
               ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
@@ -948,6 +955,27 @@ class TeslaClient:
             self.refresh_token = new_rt
             if self.on_rotate:
                 self.on_rotate(new_rt)
+        if self.cache:
+            try:
+                save_token(json.dumps({"access_token": at, "for": self._rt_id(),
+                                       "expires_at": time.time() + float(resp.get("expires_in") or 0)}),
+                           self.cache)
+            except OSError:
+                pass
+
+    def _rt_id(self) -> str:
+        return hashlib.sha256(self.refresh_token.encode()).hexdigest()[:16]
+
+    def use_cached_token(self) -> bool:
+        """Reuse the access token saved by an earlier run, if it was made from
+        this refresh token and has at least 10 minutes left."""
+        try:
+            got = json.loads(load_token(self.cache) or "{}") if self.cache else {}
+        except ValueError:
+            return False
+        if got.get("for") == self._rt_id() and float(got.get("expires_at") or 0) > time.time() + 600:
+            self.access_token = got.get("access_token") or ""
+        return bool(self.access_token)
 
     def _request(self, method: str, url: str, body: Optional[Dict[str, Any]],
                  ctx: Optional[ssl.SSLContext], bearer: Optional[str]) -> Dict[str, Any]:
@@ -982,15 +1010,9 @@ class TeslaClient:
             pass
 
     def get_vehicle_data(self, vid: str) -> Optional[Dict[str, Any]]:
-        # The car's location is only included when asked for.
-        resp = self.api_get(f"/vehicles/{vid}/vehicle_data?endpoints="
-                            + urllib.parse.quote(VEHICLE_DATA_ENDPOINTS))
+        resp = self.api_get(f"/vehicles/{vid}/vehicle_data")
         vin  = jget(resp, "response.vin", "")
         return resp if vin else None
-
-
-VEHICLE_DATA_ENDPOINTS = ("charge_state;climate_state;closures_state;drive_state;"
-                          "gui_settings;location_data;vehicle_config;vehicle_state")
 
 
 # =============================================================================
@@ -1059,7 +1081,8 @@ def fleet_client(cfg: Dict[str, Any], refresh_token: str) -> TeslaClient:
         except OSError as e:
             log_cmd("token", f"X could not save Fleet API refresh token: {e}")
     return TeslaClient(refresh_token, on_rotate=keep, api_base=cfg["fleet_api"] + "/api/1",
-                       client_id=cfg["client_id"], token_url=FLEET_TOKEN_URL, scope="")
+                       client_id=cfg["client_id"], token_url=FLEET_TOKEN_URL, scope="",
+                       cache="fleet_access_token")
 
 
 class VcBackend:
@@ -1124,7 +1147,7 @@ class VcBackend:
     def command(self, vin: str, ep: str, body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         self.start()
         url = f"{self.url}/api/1/vehicles/{vin}/command/{ep}"
-        if not self.client.access_token:
+        if not (self.client.access_token or self.client.use_cached_token()):
             self.client.refresh_access_token()
         try:
             return self.client.api_post(url, body, ctx=self.context())
@@ -1433,7 +1456,7 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
     if body is not None and "lat" in body:
         # Homelink (and closing windows on cars without the signed protocol)
         # must be sent from near the car, so send the car's own location.
-        lat, lon = car_location(st)
+        lat, lon = car_location(client if best_ep == "trigger_homelink" else None, st)
         if lat is None and best_ep == "trigger_homelink":
             return fail("car location unknown")
         if lat is not None:
@@ -1450,7 +1473,17 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
     return run_cmd(client, st, best_ep, label, body, c)
 
 
-def car_location(st: "State") -> Tuple[Optional[float], Optional[float]]:
+def car_location(client: Optional[TeslaClient], st: "State") -> Tuple[Optional[float], Optional[float]]:
+    """The car's position from the last data, else asked for (with a client):
+    routine refreshes leave the location out, since it makes them slower."""
+    if client and st.last_data and jget(st.last_data, "response.drive_state.latitude") is None:
+        try:
+            got = client.api_get(f"/vehicles/{st.vid}/vehicle_data?endpoints="
+                                 + urllib.parse.quote("drive_state;location_data"))
+            st.last_data["response"].setdefault("drive_state", {}).update(
+                jget(got, "response.drive_state", {}) or {})
+        except Exception:
+            pass
     lat = jget(st.last_data or {}, "response.drive_state.latitude", None)
     lon = jget(st.last_data or {}, "response.drive_state.longitude", None)
     return (lat, lon) if lat is not None and lon is not None else (None, None)
@@ -1468,17 +1501,90 @@ def open_url_quietly(url: str) -> bool:
     return False
 
 
+# mapscii with start coordinates and markers is still a pull request
+# (github.com/rastapasta/mapscii/pull/161), so unless a mapscii that has them
+# is installed, that pull request is fetched at this commit and built once.
+MAPSCII_REPO   = "https://github.com/rastapasta/mapscii.git"
+MAPSCII_COMMIT = "0032cabbcab021de1710271277c51512c6242409"
+ESBUILD        = "esbuild@0.28.2"
+
+
+def mapscii_command() -> List[str]:
+    """How to run a mapscii that takes --lat/--lon/--marker, building it if
+    needed (progress goes to the terminal).  Raises RuntimeError."""
+    mapscii = shutil.which("mapscii")
+    if mapscii:
+        try:
+            usage = subprocess.run([mapscii, "--help"], capture_output=True, text=True,
+                                   stdin=subprocess.DEVNULL, timeout=20).stdout
+        except (OSError, subprocess.TimeoutExpired):
+            usage = ""
+        if "--marker" in usage:
+            return [mapscii]
+    cache  = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"),
+                          "tuisla", f"mapscii-{MAPSCII_COMMIT[:8]}")
+    bundle = os.path.join(cache, "dist", "mapscii.mjs")   # it finds ../styles from there
+    node   = shutil.which("node")
+    if os.path.exists(bundle) and node:
+        return [node, bundle]
+    for tool in ("git", "node", "npm", "npx"):
+        if not shutil.which(tool):
+            raise RuntimeError(f"maptui needs {tool} (git and Node.js 18+) to fetch mapscii")
+    print(f"Fetching mapscii (pull request 161) into {cache}; only this once…", flush=True)
+    steps = [["git", "init", "-q"],
+             ["git", "fetch", "-q", "--depth", "1", MAPSCII_REPO, MAPSCII_COMMIT],
+             ["git", "checkout", "-q", "FETCH_HEAD"],
+             ["npm", "install", "-q", "--omit=dev", "--no-audit", "--no-fund"],
+             # Its build needs bun; esbuild makes a bundle plain Node runs.
+             ["npx", "-y", ESBUILD, "main.ts", "--bundle", "--platform=node", "--format=esm",
+              "--target=node18", "--external:terminal-kit", "--log-level=error", "--outfile=build.mjs",
+              '--banner:js=import{createRequire as __cr}from"module";const require=__cr(import.meta.url);']]
+    os.makedirs(cache, exist_ok=True)
+    for cmd in steps:
+        if subprocess.run(cmd, cwd=cache).returncode != 0:
+            raise RuntimeError(f"fetching mapscii failed at: {' '.join(cmd[:3])}")
+    with open(os.path.join(cache, "build.mjs"), encoding="utf-8") as f:
+        code = f.read()
+    # terminal-kit is CommonJS, which Node cannot import by name.
+    code = code.replace('import { terminal as term } from "terminal-kit";',
+                        'import __tk from "terminal-kit"; const term = __tk.terminal;')
+    os.makedirs(os.path.dirname(bundle), exist_ok=True)
+    with open(bundle, "w", encoding="utf-8") as f:
+        f.write(code)
+    return [node, bundle]
+
+
+def run_mapscii(term: Term, c: Colors, client: Optional[TeslaClient], st: "State") -> str:
+    """Show the car in mapscii, in place of the dashboard until it quits."""
+    lat, lon = car_location(client, st)
+    if lat is None:
+        return f"h help    {c.RED}X car location unknown{c.R}"
+    term.disable_raw(); term.invert_screen(False); term.alt_screen(False); term.cursor(True)
+    try:
+        cmd = mapscii_command()
+        subprocess.run(cmd + ["--lat", str(lat), "--lon", str(lon), "--zoom", "15",
+                              "--marker", f"{lat},{lon}"])
+    except (OSError, RuntimeError) as e:
+        return f"h help    {c.RED}X {str(e)[:180]}{c.R}"
+    finally:
+        term.alt_screen(True); term.cursor(False); term.invert_screen(c.inverted); term.enable_raw()
+    return ""
+
+
 def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
                  st: "State", ep: str) -> str:
     """Commands that only show something; nothing is sent to the car."""
     if ep == "_map":
-        lat, lon = car_location(st)
+        lat, lon = car_location(client, st)
         if lat is None:
             return f"h help    {c.RED}X car location unknown{c.R}"
         url = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}"
         log_cmd("map", url)
         how = "" if open_url_quietly(url) else " -- link in the log (z)"
         return f"h help    {c.GRN}✓ Map: {lat:.5f}, {lon:.5f}{how}{c.R}"
+
+    if ep == "_maptui":
+        return run_mapscii(term, c, client, st)
 
     if client is None:
         sites: Dict[str, Any] = DEMO_CHARGERS
@@ -1502,6 +1608,7 @@ class State:
     refresh_interval: int = 5
     show_help: bool = False
     cmd_msg: str = ""
+    cmd_msg_at: float = 0.0      # when cmd_msg was first shown
     prompt_row: int = 0          # row of the last status line, set by flush_frame
     prompt_col: int = 0          # col of the prompt cursor, set by render_dashboard
     target_vin: str = ""
@@ -2052,12 +2159,15 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
 
     frame.blank()
     frame.cat_labels = False
+    if st.cmd_msg_at and time.time() - st.cmd_msg_at >= MSG_SECONDS:
+        st.cmd_msg, st.cmd_msg_at = "", 0.0
     frame.row1(c, st.cmd_msg if st.cmd_msg else f"{c.GRY}h help{c.R}", "")
 
     w_local       = min(frame.maxvis, term_w)
     st.prompt_col = max(0, (term_w - w_local) // 2) + 2 + 9 + 1   # margin + indent + lbl_w + space
     st.prompt_row = flush_frame(term, c, frame)
-    st.cmd_msg = ""
+    if st.cmd_msg and not st.cmd_msg_at:
+        st.cmd_msg_at = time.time()
 
 
 # =============================================================================
@@ -2174,6 +2284,7 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
             st.cmd_msg = parse_and_run_cmd(term, c, client, st)
         else:
             st.cmd_msg = run_cmd(client, st, *HOTKEYS[key], None, c)
+        st.cmd_msg_at = 0.0                 # a new message starts its own 3 s
         return True                         # force immediate refresh after any command
 
     return False
@@ -2280,7 +2391,7 @@ def main() -> int:
                 log_cmd("token", f"X could not save refresh token: {e}")
 
         if refresh_token:
-            client = TeslaClient(refresh_token, on_rotate=keep_token)
+            client = TeslaClient(refresh_token, on_rotate=keep_token, cache="access_token")
         else:
             # No Owner API login: read through the Fleet API, which is billed.
             client = st.vc.client
@@ -2288,17 +2399,25 @@ def main() -> int:
             st.refresh_interval = max(st.refresh_interval, FLEET_MIN_REFRESH)
         term.home(); term.clear_to_end()
         term.write("Authenticating…\n")
-        try:
-            client.refresh_access_token()
-        except RuntimeError:
-            # An env token goes stale once Tesla rotates it; the saved one is newer.
-            if not (env_token and saved_token and saved_token != env_token):
-                raise
-            term.write("TESLA_REFRESH_TOKEN rejected, trying the saved token…\n")
-            client.refresh_token = saved_token
-            client.refresh_access_token()
+        cached = client.use_cached_token()
+        if not cached:
+            try:
+                client.refresh_access_token()
+            except RuntimeError:
+                # An env token goes stale once Tesla rotates it; the saved one is newer.
+                if not (env_token and saved_token and saved_token != env_token):
+                    raise
+                term.write("TESLA_REFRESH_TOKEN rejected, trying the saved token…\n")
+                client.refresh_token = saved_token
+                client.refresh_access_token()
         term.write("Looking up vehicle…\n")
-        vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
+        try:
+            vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
+        except RuntimeError as e:
+            if not (cached and str(e).startswith("HTTP 401")):
+                raise
+            client.refresh_access_token()      # the saved access token was revoked
+            vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
         st.vid   = vid
 
         if not st.target_vin and vin:
@@ -2307,8 +2426,6 @@ def main() -> int:
         term.write(f"Connected: {st.target_vin or '?VIN?'} (vid {vid}) [{st.mode}]\n")
         if not vid:
             raise RuntimeError("No vehicle found -- check TESLA_VIN or token")
-
-        time.sleep(0.5)
 
         data: Optional[Dict[str, Any]] = None
         _wake_attempt = 0   # counts consecutive failed wake cycles

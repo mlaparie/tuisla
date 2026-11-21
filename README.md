@@ -47,6 +47,10 @@ See `./tuisla --help` for more options.
 
 ## Commands
 
-Press `?` for the full list. Besides the usual lock, climate and charging commands, there are seat heating and cooling (`seat heat driver 2`), climate keeper and dog mode (`keeper dog`), cabin overheat protection, Guest Mode, PIN to Drive, speed limit, renaming the car, sending a destination (`navigate 1 Main St, Springfield`), Homelink, waking the car, and two read-only ones: `map` (the car's location on OpenStreetMap) and `chargers` (nearby Superchargers with free stalls).
+Press `?` for the full list. Besides the usual lock, climate and charging commands, there are seat heating and cooling (`seat heat driver 2`), climate keeper and dog mode (`keeper dog`), cabin overheat protection, Guest Mode, PIN to Drive, speed limit, renaming the car, sending a destination (`navigate 1 Main St, Springfield`), Homelink, waking the car, and three read-only ones: `map` (the car's location on OpenStreetMap in the browser), `maptui` (the same in the terminal with [mapscii](https://github.com/rastapasta/mapscii); its version with start coordinates is still [a pull request](https://github.com/rastapasta/mapscii/pull/161), which tuisla fetches and builds on first use with git and Node.js) and `chargers` (nearby Superchargers with free stalls).
 
 Not possible: Sentry Mode and dashcam clips are only stored on the car's USB drive, and the live Sentry camera view only works in Tesla's own app; no API gives access to them.
+
+## Credits
+
+`maptui` runs [MapSCII](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which adds start coordinates and markers. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
