@@ -1849,17 +1849,21 @@ def mapscii_command() -> List[str]:
 
 
 def patch_mapscii(bundle: str) -> None:
-    """mapscii has no option to start in its globe view, so this adds one:
-    MAPSCII_GLOBE=1 opens it once the map is up, as if o was pressed."""
+    """Small changes to the mapscii bundle: MAPSCII_GLOBE=1 opens the globe
+    view once the map is up, as if o was pressed (mapscii has no option for
+    it), and a space between each marker and its label."""
     with open(bundle, encoding="utf-8") as f:
         code = f.read()
+    patched = code
     hook = "    if (this.locateOnStart) {"
-    if "MAPSCII_GLOBE" in code or hook not in code:
-        return
-    code = code.replace(hook, "    if (process.env.MAPSCII_GLOBE) setTimeout(() => void this._handleGlobeView(), 300);\n"
-                        + hook, 1)
-    with open(bundle, "w", encoding="utf-8") as f:
-        f.write(code)
+    if "MAPSCII_GLOBE" not in patched and hook in patched:
+        patched = patched.replace(hook, "    if (process.env.MAPSCII_GLOBE) setTimeout("
+                                  "() => void this._handleGlobeView(), 300);\n" + hook, 1)
+    patched = patched.replace("const labelX = x + glyphWidth * 2;",
+                              "const labelX = x + (glyphWidth + 1) * 2;", 1)
+    if patched != code:
+        with open(bundle, "w", encoding="utf-8") as f:
+            f.write(patched)
 
 
 DEFAULT_RANGE_KM = 100            # chargers range when the car's range is unknown
