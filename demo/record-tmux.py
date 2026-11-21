@@ -7,10 +7,11 @@ mode, from a temporary copy (so it logs there and sees no tokens).
 Usage: demo/record-tmux.py [OUT.cast]      (default: demo/tuisla.cast)
 Needs: tmux, python3, and node for the mapscii part (on Guix:
 guix shell node -- demo/record-tmux.py).
-Make the GIF with agg (on Guix, the asciinema-agg package):
-    guix shell asciinema-agg font-dejavu -- sh -c \
-      'agg --font-dir "$GUIX_ENVIRONMENT/share/fonts" --font-family "DejaVu Sans Mono" \
-           demo/tuisla.cast demo/tuisla.gif'"""
+Make the GIF with agg (on Guix, the asciinema-agg package; the emoji font
+draws the icons of the fancy style):
+    guix shell asciinema-agg font-dejavu font-google-noto-emoji -- sh -c \
+      'agg --font-dir "$GUIX_ENVIRONMENT/share/fonts" \
+           --font-family "DejaVu Sans Mono,Noto Color Emoji" demo/tuisla.cast demo/tuisla.gif'"""
 import codecs, fcntl, json, os, pty, select, shlex, shutil, struct, subprocess, sys
 import tempfile, termios, time
 
@@ -39,16 +40,17 @@ SCRIPT = [
     (7,  [(0.8, "?"), (2.0, "j"), (0.3, "j"), (0.3, "j"), (0.3, "j")], 1.5),
     (8,  [(0.8, "/")] + typed("climate", 0.15) + [(0.8, "Enter"), (2.0, "n")], 2.0),
     (None, [(0, "q")], 0.5),
-    (9,  [(0.8, ":")] + typed("ch") + [(0.6, "Tab"), (1.8, "Tab")] + typed("limit 80")
-         + [(1.2, "Enter"), (2.5, ":")] + typed("temp 22") + [(1.0, "Enter")], 3.0),
+    (9,  [(0.8, ":")] + typed("te") + [(0.6, "Tab"), (1.8, "Tab")] + typed(" 22")
+         + [(1.2, "Enter")], 3.0),
     (10, [(0.8, "H")], 3.0),
     (11, [(0.8, "z")], 3.5),
     (None, [(0, "q")], 0.5),
-    (12, [(0.8, ":")] + typed("chargers") + [(0.8, "Enter"), (2.5, "j"), (1.2, "Enter")], 3.5),
+    (12, [(0.8, ":")] + typed("chargers 200") + [(0.8, "Enter"), (2.5, "j"), (1.2, "Enter")], 4.5),
     (13, [(0.8, ":")] + typed("mapscii chargers", 0.1) + [(0.8, "Enter")], 9.0),
     (None, [(0, "q")], 1.0),
+    # The globe starts with the whole Earth, then zooms in on Europe.
     (14, [(0.8, ":")] + typed("mapscii globe", 0.1) + [(0.8, "Enter"), (5.0, "o")]
-         + [(3.0, "Left")] + [(0.5, "Left")] * 6, 2.5),
+         + [(3.0, "a")] + [(0.6, "a")] * 6, 3.0),
     (None, [(0, "q"), (2.5, "q")], 1.0),
     (15, [(0.8, "W"), (3.5, "W")], 3.0),
     (16, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),

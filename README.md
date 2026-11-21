@@ -1,38 +1,40 @@
-# tuisla
+# `tuisla`
 
 A TUI to check on and control your Tesla from the comfort of your terminal:
-battery, charging, climate, tyres, locks and the current route at a glance,
-commands like lock, climate or charge limit from the keyboard, and nearby
-chargers on a map in the terminal, one key away from being the destination.
+battery, charging, climate, and locks at a glance, commands like trunk, lock,
+climate or charge limit from the keyboard, and the car or nearby chargers on
+a map.
 
 It runs on Linux, macOS or even Android (Termux).
 
 ![tuisla demo](demo/tuisla.gif)
 
-*The left pane is just a table of contents; the actual app is on the
-right only (demo data, read-only mode).*
+*The left pane is just a table of contents for this demo; the actual app is
+on the right only (demo data, read-only mode).*
 
 ## What you need
 
 - Python 3 and `curl`.
-- On Linux, `xdg-mime` (package `xdg-utils` on Guix and most distros) so `--login` can catch the Tesla sign-in link by itself. Without it, you have to copy that link from the browser by hand.
-- A Tesla account. Reading your car's information is free.
-- A [MyTeslaMate API](https://www.myteslamate.com/api/)
-  token is needed to send commands to the car. This is a pay-as-you-go thingie, about 1€ for 500 commands per month. You *do not* need a "MyTeslaMate instance" subscription, just the API.
+- On Linux, `xdg-mime` (package `xdg-utils` on Guix and most distros), so that `--login` can catch the Tesla sign-in link by itself. Without it, you have to copy that link from the browser by hand.
+- Optionally, an emoji font such as Noto Color Emoji (`font-google-noto-emoji` on Guix, `fonts-noto-color-emoji` on Debian), for the icons of the fancy style (`s` switches to the plain one).
+- A Tesla account. Reading the car's information works out of the box and needs no extra API.
+- To send commands to the car, one of:
+  - a [MyTeslaMate API](https://www.myteslamate.com/api/) token: a pay-as-you-go thingie, about 1 € for 500 commands per month. You *do not* need a "MyTeslaMate instance" subscription, just the API.
+  - vc mode (see [Modes](#modes)): no paid API, but more involved to set up.
 
 ## Setup
 
-`tuisla` is just a standalone Python script, so you just need to have Python 3 and make the script executable with `chmod a+x tuisla`.
+`tuisla` is a standalone Python script for the most part (it only calls an accessory script, `tuisla-setup-vc`, once if you set up vc mode), so you just need Python 3 and to make the script executable with `chmod a+x tuisla`.
 
 ```sh
 # First execution:
-./tuisla --login  # will help you get and store your Tesla and MyTeslaMate API tokens
+./tuisla --login  # gets and stores your Tesla token, then your MyTeslaMate API token or sets up vc mode
 
 # From there, just:
 ./tuisla
 ```
 
-You can skip the MyTeslaMate step if you don't want to send commands to the car. Without any login, `./tuisla` will just show demo data.
+You can skip the MyTeslaMate step if you don't want to send commands to the car, or if you favour vc mode. Without any login, `./tuisla` will just show demo data.
 
 ## Use
 
@@ -40,26 +42,96 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car.
 
 ## Modes
 
-- `--mode mtm` (default, recommended), commands are sent to the car through the MyTeslaMate API.
-- `--mode ro` (read-only), commands are checked for validity, but not sent.
-- `--mode vc`, commands are signed by tuisla itself with your own key, through Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy, and sent with your own Tesla developer app instead of MyTeslaMate. Run `./tuisla --setup-vc` once (it runs `tuisla-setup-vc`, which must sit next to `tuisla`): it walks you through every step (keys, publishing the public key on a free GitHub Pages site, the Tesla developer app, adding the key to the car from the Tesla app) and checks each one. It needs `openssl`, plus [Go](https://go.dev/) and git to build the proxy: on Guix or Nix it runs them in a temporary `guix shell` / `nix-shell`, elsewhere it offers to install them with your package manager (apt, dnf, pacman, zypper, apk, Homebrew or Termux) and to remove them again at the end, or you can install them yourself. You also need a payment card on the Tesla developer site; Tesla's $10 monthly credit covers a personal car. When there is no internet route to the car (an underground car park, airplane mode), vc mode sends lock, unlock, allow driving, trunk, frunk, climate, charging and a few other commands over Bluetooth instead, with Tesla's `tesla-control`, which the setup builds too (on Linux it asks once for `sudo setcap cap_net_admin=eip` so it can use Bluetooth). Once set up, vc mode also works without `--login-tesla`, but vehicle data then comes from the billed Fleet API, so tuisla refreshes every 60 s at most.
+- `--mode mtm` (default, recommended): commands are sent to the car through the MyTeslaMate API.
+- `--mode ro` (read-only): commands are checked for validity, but not sent.
+- `--mode vc` (vehicle-command): commands are sent through Tesla's own [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy instead of MyTeslaMate, with your own Tesla developer account and a key paired with your car. This mode requires no paid API (Tesla's $10 monthly credit covers a personal car, commands costing $1 per 1,000, though its developer site asks for a payment card), but its setup is more involved: `./tuisla --setup-vc` (or `--login`) walks you through it. It needs `openssl` and Go; on Guix and Nix, it runs them in a temporary `guix shell` / `nix-shell` instead of installing them, and elsewhere it offers to install them and remove them again at the end. It can work over Bluetooth when the phone or the car has no network (*e.g.*, an underground car park). `tuisla` uses vc mode by default when it is set up and MyTeslaMate is not.
 
-See `./tuisla --help` for more options.
-
-[FILES.org](FILES.org) lists the files tuisla keeps (tokens, keys, caches) and which ones are needed.
+See `./tuisla --help` for more options, and [FILES.org](FILES.org) for the files `tuisla` keeps.
 
 ## Commands
 
-Press `?` for the full list. Besides the usual lock, climate and charging commands, there are seat heating and cooling (`seat heat driver 2`), climate keeper and dog mode (`keeper dog`), cabin overheat protection, Guest Mode, PIN to Drive, speed limit, renaming the car, sending a destination (`navigate 1 Main St, Springfield` or `navigate gps 37.49 -121.94`), Homelink, waking the car, and:
+`:` types a command (Tab completes it), `?` shows this list in the app. Tesla's commands:
 
-- `map` / `mapscii`: the car's location on OpenStreetMap in the browser, or in the terminal with [mapscii](https://github.com/rastapasta/mapscii) (its version with start coordinates is still [a pull request](https://github.com/rastapasta/mapscii/pull/161), which tuisla fetches and builds on first use with git and Node.js; on Guix: `guix install node git`). `map chargers` and `mapscii chargers` add the nearby chargers (◯ the car, ■ Superchargers, ▮ destination chargers, all fitted on screen), and `mapscii globe` shows them on the whole Earth: press `o` there for a 3D globe. Quitting the map leaves nothing behind in the terminal.
-- `chargers`: nearby Superchargers with free stalls and destination chargers; pick one with `j`/`k` and press Enter to send it to the car as the destination.
-- `route`: the destination, distance, arrival time and battery left at arrival. While a route is active the dashboard shows it too.
+```
+Security
+  sentry on|off                Enable/disable Sentry Mode
+  valet on|off                 Enable/disable valet mode (valet on <pwd>)
+  valet reset pin              Clear the valet mode PIN
+  guest on|off                 Enable/disable Guest Mode
+  pin2drive on|off <pin>       Enable/disable PIN to Drive
+  pin2drive reset              Clear the PIN to Drive PIN
+  honk                         Honk the horn
+  flash                        Flash the lights
+  remote start                 Allow keyless driving for 2 minutes
 
-The car cannot be put to sleep through the API, but it falls asleep on its own when nothing asks it for data for about 15 minutes. tuisla lets it by default: it only polls whether the car is awake, fetches data only while the car is driving, charging or conditioning (or when you press `r`), and wakes it only to deliver a command, after which it falls asleep again. `w` wakes it once and lets it fall asleep again; `W` (or starting with `-W`) keeps it awake. While the car is asleep or out of reach (an underground car park, say), the dashboard shows the last data tuisla saw, with its time at the top right.
+Locking
+  lock|unlock                  Lock/unlock the doors
+  windows vent|close           Vent/close all windows
+  trunk|frunk open             Open the rear trunk/the frunk
+  tonneau open|close|stop      Open/close/stop the tonneau (Cybertruck)
 
-Not possible: Sentry Mode and dashcam clips are only stored on the car's USB drive, and the live Sentry camera view only works in Tesla's own app; no API gives access to them.
+Charging
+  charge start|stop            Start/stop charging
+  charge limit <percent>       Set charge limit % (e.g. charge limit 80)
+  charge max|std               Charge limit to max range/standard
+  charge amps <charging_amps>  Set charging amps (e.g. charge amps 16)
+  port open|close              Open/close the charge port
+
+Climate
+  climate on|off               Turn climate on/off
+  temp <temp>                  Set both seats temp (e.g. temp 21)
+  temp_driver <temp>           Set driver temp only (e.g. temp_driver 21)
+  temp_passenger <temp>        Set passenger temp only (e.g. temp_passenger 19)
+  defrost on|off               Enable/disable max defrost/preconditioning
+  seat heat <seat> <level>     Seat heat level 0-3 (e.g. seat heat driver 2)
+  seat cool <seat> <level>     Front seat cooling level 0-3 (e.g. seat cool passenger 1)
+  seat auto on|off <seat>      Automatic front seat climate on/off
+  steering heat on|off         Steering wheel heater on/off
+  keeper off|on|dog|camp       Climate keeper: off, keep, dog or camp mode
+  overheat on|fan|off          Cabin overheat protection on/fan only/off
+  overheat temp <level>        Overheat protection temp: low, medium or high
+  bioweapon on|off             Bioweapon Defense Mode on/off
+
+Settings
+  speed limit on|off <pin>     Activate/deactivate speed limit
+  speed limit set|clear        Set limit (km/h, mph with -u us)/clear PIN
+  name <vehicle_name>          Rename the car (e.g. name Blue Thunder)
+  accessory power on|off       Keep accessory power on/off
+  low power on|off             Low power mode on/off (Cybertruck)
+  sunroof vent|close           Vent/close the sunroof (older Model S)
+
+Media
+  media play|next|prev         Toggle playback / next / prev track
+  media fav next|prev          Next/previous favorite
+  media vol up|down            Volume up/down
+  volume <volume>              Set the volume 0-11 (needs someone in the car)
+
+Navigation
+  navigate <address>           Send a destination to the car (e.g. navigate 1 Main St, Springfield)
+  navigate gps <lat> <lon>     Send coordinates to the car (e.g. navigate gps 37.49 -121.94)
+
+Miscellaneous
+  homelink                     Trigger Homelink garage opener
+  update start|cancel          Start/cancel pending software update
+  wake                         Wake the car up
+```
+
+`tuisla`'s own, which combine those with maps. The `mapscii` ones fetch and build [`mapscii`](https://github.com/rastapasta/mapscii) on first use, which needs Node.js; on Guix and Nix, `tuisla` runs it in a temporary `guix shell` / `nix-shell` instead of installing it:
+
+```
+map                          Open the car's location on a map in the browser
+map chargers                 Open the car and nearby chargers on a map in the browser
+mapscii                      Show the car on a map in the terminal (mapscii)
+mapscii chargers             Show the car and nearby chargers in the terminal (mapscii)
+mapscii globe                Every Supercharger in the world (supercharge.info); o: 3D globe
+chargers                     Chargers within the car's range, or km (chargers 50); Enter sends one
+route                        Show the destination, arrival time and energy
+```
+
+## Sleep
+
+`tuisla` lets the car sleep when it is idle and wakes it only for commands: `w` wakes it, `W` (or `-W`) keeps it awake. While it sleeps or is out of reach, the dashboard shows the last data seen.
 
 ## Credits
 
-`mapscii` runs [MapSCII](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors.
+The `mapscii` commands run [`mapscii`](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which rewrites it in TypeScript and adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. `mapscii globe` shows the Superchargers listed by [supercharge.info](https://supercharge.info).

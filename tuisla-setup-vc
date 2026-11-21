@@ -498,7 +498,8 @@ you to tap your key card on the console; do it.""")
                 if subprocess.run(remove + pkgs).returncode == 0:
                     del cfg["installed"]
                     save()
-        print("\nAll set.  Start tuisla in vc mode with:  tuisla -m vc")
+        print("\nAll set.  Start tuisla (it uses vc mode unless MyTeslaMate is set up too;\n"
+              "then use: tuisla -m vc).")
         return 0
     except (KeyboardInterrupt, EOFError):
         print("\nStopped; run tuisla --setup-vc to carry on.")
