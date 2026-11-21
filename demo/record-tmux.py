@@ -47,8 +47,10 @@ SCRIPT = [
     (12, [(0.8, ":")] + typed("chargers 200") + [(0.8, "Enter"), (2.5, "j"), (1.2, "Enter")], 4.5),
     (13, [(0.8, ":")] + typed("mapscii chargers", 0.1) + [(0.8, "Enter")], 9.0),
     (None, [(0, "q")], 1.0),
-    # The globe starts with the whole Earth, then zooms in on Europe.
-    (14, [(0.8, ":")] + typed("mapscii globe", 0.1) + [(0.8, "Enter"), (5.0, "o")]
+    (None, [(0.5, ":")] + typed("mapscii country", 0.1) + [(0.8, "Enter")], 7.0),
+    (None, [(0, "q")], 1.0),
+    # The world as a globe, then zoomed in on Europe.
+    (14, [(0.8, ":")] + typed("mapscii world", 0.1) + [(0.8, "Enter"), (5.0, "o")]
          + [(3.0, "a")] + [(0.6, "a")] * 6, 3.0),
     (None, [(0, "q"), (2.5, "q")], 1.0),
     (15, [(0.8, "W"), (3.5, "W")], 3.0),

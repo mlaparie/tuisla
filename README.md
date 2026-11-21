@@ -123,7 +123,8 @@ map                          Open the car's location on a map in the browser
 map chargers                 Open the car and nearby chargers on a map in the browser
 mapscii                      Show the car on a map in the terminal (mapscii)
 mapscii chargers             Show the car and nearby chargers in the terminal (mapscii)
-mapscii globe                Every Supercharger in the world (supercharge.info); o: 3D globe
+mapscii country              Superchargers of the car's country, or another (mapscii country Spain)
+mapscii world                Every Supercharger in the world (supercharge.info); o: 3D globe
 chargers                     Chargers within the car's range, or km (chargers 50); Enter sends one
 route                        Show the destination, arrival time and energy
 ```
@@ -134,4 +135,4 @@ route                        Show the destination, arrival time and energy
 
 ## Credits
 
-The `mapscii` commands run [`mapscii`](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which rewrites it in TypeScript and adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. `mapscii globe` shows the Superchargers listed by [supercharge.info](https://supercharge.info).
+The `mapscii` commands run [`mapscii`](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which rewrites it in TypeScript and adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. `mapscii country` and `mapscii world` show the Superchargers listed by [supercharge.info](https://supercharge.info).

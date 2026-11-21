@@ -242,7 +242,7 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("volume <volume>",         "adjust_volume",                    {"volume": "<volume>"},                     "Set the volume 0-11 (needs someone in the car)"),
     # ── Navigation ───────────────────────────────────────────────────────────
     ("navigate <address>",      "navigation_request",               {"address": "<address>"},                   "Send a destination to the car (e.g. navigate 1 Main St, Springfield)"),
-    ("navigate gps <lat> <lon>","navigation_gps_request",           {"lat": "<lat>", "lon": "<lon>"},           "Send coordinates to the car (e.g. navigate gps 37.49 -121.94)"),
+    ("navigate gps <lat> <lon>","navigation_gps_request",           {"lat": "<lat>", "lon": "<lon>", "order": 1}, "Send coordinates to the car (e.g. navigate gps 37.49 -121.94)"),
     # ── Miscellaneous ────────────────────────────────────────────────────────
     ("homelink",                "trigger_homelink",                 {"lat": 0, "lon": 0},                       "Trigger Homelink garage opener"),
     ("update start",            "schedule_software_update",         {"offset_sec": 0},                          "Start pending software update now"),
@@ -253,7 +253,8 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("map chargers",            "_map_chargers",                    None,                                       "Open the car and nearby chargers on a map in the browser"),
     ("mapscii",                 "_mapscii",                         None,                                       "Show the car on a map in the terminal (mapscii)"),
     ("mapscii chargers",        "_mapscii_chargers",                None,                                       "Show the car and nearby chargers in the terminal (mapscii)"),
-    ("mapscii globe",           "_mapscii_globe",                   None,                                       "Every Supercharger in the world (supercharge.info); o: 3D globe"),
+    ("mapscii country",         "_mapscii_country",                 None,                                       "Superchargers of the car's country, or another (mapscii country Spain)"),
+    ("mapscii world",           "_mapscii_world",                   None,                                       "Every Supercharger in the world (supercharge.info); o: 3D globe"),
     ("chargers",                "_chargers",                        None,                                       "Chargers within the car's range, or km (chargers 50); Enter sends one"),
     ("route",                   "_route",                           None,                                       "Show the destination, arrival time and energy"),
 ]
@@ -1546,6 +1547,8 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
             st.charger_range_km = float(arg_tokens[0])
         except ValueError:
             return fail(f"range must be a number of km, got '{arg_tokens[0]}'")
+    if best_ep == "_mapscii_country":                    # optional country name
+        st.map_country = " ".join(arg_tokens)
     if len(arg_tokens) < len(best_args):
         return fail(f"missing argument <{best_args[len(arg_tokens)]}> for '{best_key}'")
     if best_args and best_args[-1] in _TEXT_ARGS:     # free text: takes the rest of the line
@@ -1774,12 +1777,13 @@ def nearby_chargers(client: Optional[TeslaClient], st: "State") -> Dict[str, Any
 
 
 # Every Supercharger in the world, from supercharge.info's open data, for
-# mapscii globe: cached, and refreshed in the background once a week.
+# mapscii world and country: cached, and refreshed in the background once a week.
 SUPERCHARGE_INFO = "https://supercharge.info/service/supercharge/allSites"
 WORLD_REFRESH    = 7 * 86400
 
 
-def world_superchargers(notify: Optional[Callable[[str], None]]) -> List[Tuple[str, float, float, str]]:
+def world_superchargers(notify: Optional[Callable[[str], None]]) -> List[Dict[str, Any]]:
+    """The open Superchargers in supercharge.info's list."""
     path = cache_file("superchargers.json")
 
     def fetch() -> None:
@@ -1806,8 +1810,23 @@ def world_superchargers(notify: Optional[Callable[[str], None]]) -> List[Tuple[s
         threading.Thread(target=refresh, daemon=True).start()
     with open(path, encoding="utf-8") as f:
         sites = json.load(f)
-    return [("world", float(s["gps"]["latitude"]), float(s["gps"]["longitude"]), "")
-            for s in sites if s.get("status") == "OPEN" and s.get("gps")]
+    return [s for s in sites if s.get("status") == "OPEN" and s.get("gps")]
+
+
+def site_point(site: Dict[str, Any]) -> Tuple[str, float, float, str]:
+    return ("world", float(site["gps"]["latitude"]), float(site["gps"]["longitude"]), "")
+
+
+def core(points: List[Tuple[str, float, float, str]]) -> List[Tuple[str, float, float, str]]:
+    """The points without the farthest 2% on each side, so that overseas
+    sites do not zoom a country out to half the world."""
+    if len(points) < 20:
+        return points
+    def bounds(i: int) -> Tuple[float, float]:
+        v = sorted(p[i] for p in points)
+        return v[len(v) // 50], v[-1 - len(v) // 50]
+    (la0, la1), (lo0, lo1) = bounds(1), bounds(2)
+    return [p for p in points if la0 <= p[1] <= la1 and lo0 <= p[2] <= lo1]
 
 
 def charger_points(sites: Dict[str, Any]) -> List[Tuple[str, float, float, str]]:
@@ -1843,8 +1862,8 @@ m.fitBounds(pts.map(p => [p[1], p[2]]), {padding: [30, 30], maxZoom: 15});
 </script>"""
 
 
-_MARKERS = {"car": ("◯", "#ff3030"), "superchargers": ("■", "#ffaa00"),
-            "destination_charging": ("▮", "#00ccff"), "world": ("•", "#ffaa00")}
+_MARKERS = {"car": ("◯", "#ff3030"), "superchargers": ("■", "#00cc44"),
+            "destination_charging": ("▮", "#00ccff"), "world": ("•", "#00cc44")}
 
 
 def fit_zoom(points: List[Tuple[str, float, float, str]], cols: int, rows: int) -> Tuple[float, float, float]:
@@ -1863,14 +1882,14 @@ def fit_zoom(points: List[Tuple[str, float, float, str]], cols: int, rows: int) 
 
 
 def run_mapscii(term: Term, c: Colors, points: List[Tuple[str, float, float, str]],
-                zoom: Optional[float]) -> str:
+                zoom: Optional[float], fit: Optional[List[Tuple[str, float, float, str]]] = None) -> str:
     """Show the points in mapscii, in place of the dashboard until it quits:
     around the first one at that zoom, or all of them if zoom is None.  It
     draws on tuisla's screen, which is cleared afterwards, so no map is left
     in the terminal."""
     lat, lon = points[0][1], points[0][2]
     if zoom is None:
-        lat, lon, zoom = fit_zoom(points, *term.get_size())
+        lat, lon, zoom = fit_zoom(fit or points, *term.get_size())
     path = cache_file("markers.geojson")
     with open(path, "w", encoding="utf-8") as f:
         json.dump({"type": "FeatureCollection", "features": [
@@ -1919,7 +1938,12 @@ def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         car_location(client, st, fresh=True)
         st.route_until = time.time() + ROUTE_WATCH
         route = route_summary(st)
-        return f"h help    {c.GRN}✓ Route: {route}{c.R}" if route else f"h help    {c.GRY}No active route{c.R}"
+        if route:
+            return f"h help    {c.GRN}✓ Route: {route}{c.R}"
+        # What the car did send, to see whether route fields exist at all.
+        keys = sorted(jget(st.last_data or {}, "response.drive_state", {}) or {})
+        log_cmd("route", "no active route; drive_state has: " + ", ".join(keys))
+        return f"h help    {c.GRY}No active route (what the car sent is in the log: z){c.R}"
 
     lat, lon = car_location(client, st)
     car = ("car", lat, lon, str(jget(st.last_data or {}, "response.vehicle_state.vehicle_name", "") or "car"))
@@ -1933,12 +1957,28 @@ def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         how = "" if open_url_quietly(url) else " -- link in the log (z)"
         return f"h help    {c.GRN}✓ Map: {lat:.5f}, {lon:.5f}{how}{c.R}"
 
-    if ep == "_mapscii_globe":
+    if ep in ("_mapscii_world", "_mapscii_country"):
         try:
-            points = world_superchargers(st.notify)
+            sites = world_superchargers(st.notify)
         except (OSError, ValueError) as e:
             return fail(f"supercharge.info: {e}")
-        return run_mapscii(term, c, ([car] if lat is not None else []) + points, 0)
+        mine = [car] if lat is not None else []
+        if ep == "_mapscii_world":
+            return run_mapscii(term, c, mine + [site_point(x) for x in sites], 0)
+        country = st.map_country
+        if not country:                     # the car's: that of the nearest Supercharger
+            if lat is None:
+                return fail("car location unknown; name a country (mapscii country France)")
+            country = min(sites, key=lambda x: (x["gps"]["latitude"] - lat) ** 2
+                          + ((x["gps"]["longitude"] - lon) * math.cos(math.radians(lat))) ** 2
+                          )["address"].get("country", "")
+        names = sorted({x["address"].get("country", "") for x in sites})
+        match = next((n for n in names if n.lower() == country.lower()), None) \
+            or next((n for n in names if n.lower().startswith(country.lower())), None)
+        if not match:
+            return fail(f"no Superchargers listed for '{country}'")
+        points = [site_point(x) for x in sites if x["address"].get("country") == match]
+        return run_mapscii(term, c, mine + points, None, fit=core(points))
 
     try:
         sites = nearby_chargers(client, st)
@@ -1946,14 +1986,22 @@ def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         return fail(api_error(e))
     if ep == "_chargers":
         site = show_chargers_pager(term, c, st, sites)
-        loc  = (site or {}).get("location") or {}
-        if loc.get("lat") is None:
+        if site is None:
             return ""
         st.route_until = time.time() + ROUTE_WATCH
         if client is None:
             demo_route(site)
-        return run_cmd(client, st, "navigation_gps_request", f"Navigating to {site.get('name', '?')}",
-                       {"lat": loc["lat"], "lon": loc["long"]}, c)
+        name, loc = str(site.get("name", "?")), site.get("location") or {}
+        if loc.get("lat") is not None and loc.get("long") is not None:
+            return run_cmd(client, st, "navigation_gps_request", f"Navigating to {name}",
+                           {"lat": loc["lat"], "lon": loc["long"], "order": 1}, c)
+        # No coordinates in what Tesla sent: search the name as a destination.
+        log_cmd("chargers", f"no location for {name}; site has: {', '.join(sorted(site))}")
+        text = name if "total_stalls" not in site else f"Tesla Supercharger {name}"
+        return run_cmd(client, st, "navigation_request", f"Navigating to {name}",
+                       {"type": "share_ext_content_raw", "locale": "en-US",
+                        "timestamp_ms": str(int(time.time() * 1000)),
+                        "value": {"android.intent.extra.TEXT": text}}, c)
 
     points = charger_points(sites)
     if lat is not None:
@@ -1994,7 +2042,8 @@ class State:
     watch_until: float = 0.0     # fetch data until then even if the car may sleep (after a command)
     status: str = ""             # shown on the message line while nothing else is
     let_sleep: bool = True       # only poll the state while the car is idle, so it can sleep
-    charger_range_km: Optional[float] = None     # chargers range set with r; None: the car's range
+    charger_range_km: Optional[float] = None     # chargers range in km; None: the car's range
+    map_country: str = ""        # mapscii country's argument; "": the car's country
     notify: Optional[Callable[[str], None]] = None   # shows progress on the message line
 
 

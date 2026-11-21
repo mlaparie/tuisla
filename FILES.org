@@ -29,7 +29,7 @@ remakes it when needed.
 | File                 | What it is                                                                       |
 |----------------------+----------------------------------------------------------------------------------|
 | =mapscii-0032cabb/=  | mapscii (pull request 161), fetched and built for =mapscii=                      |
-| =superchargers.json= | Every Supercharger, from supercharge.info, for =mapscii globe=; refreshed weekly |
+| =superchargers.json= | Every Supercharger, from supercharge.info, for =mapscii country= and =world=; refreshed weekly |
 | =markers.geojson=    | The car and chargers last shown in mapscii                                       |
 | =map.html=           | The map last opened by =map chargers=                                            |
 

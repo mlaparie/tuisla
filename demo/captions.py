@@ -18,8 +18,8 @@ STEPS = [
     ("Hotkeys",             "H",     "One-key commands, e.g. H honks (not sent in read-only mode)."),
     ("Command log",         "z",     "Every command and its result is logged."),
     ("Chargers",            ":",     "Chargers in range, or in km (chargers 200); Enter sends one to the car."),
-    ("Terminal map",        ":",     "mapscii chargers: the car and the chargers on a map in the terminal (mapscii)."),
-    ("  Globe view",        "o",     "mapscii globe, then o: every Supercharger (supercharge.info) on a 3D globe."),
+    ("Terminal map",        ":",     "mapscii chargers / country: the car and the Superchargers in range or in its country."),
+    ("  Globe view",        "o",     "mapscii world, then o: all Superchargers on a 3D globe."),
     ("Sleep",               "W",     "The car may sleep when idle (default); W keeps it awake, w wakes it once."),
     ("Modes",               "m",     "ro -> mtm (MyTeslaMate API) -> vc (own key, via vehicle-command)."),
 ]
