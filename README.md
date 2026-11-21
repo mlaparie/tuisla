@@ -15,7 +15,8 @@ on the right only (demo data, read-only mode).*
 ## What you need
 
 - Python 3 and `curl`.
-- On Linux, `xdg-mime` (package `xdg-utils` on Guix and most distros), so that `--login` can catch the Tesla sign-in link by itself. Without it, you have to copy that link from the browser by hand.
+- On Linux, `xdg-mime` (package `xdg-utils` on most distros), so that `--login` can catch the Tesla sign-in link by itself. Without it, you have to copy that link from the browser by hand.
+- Optionally, a font with the icons of the fancy style (⌁ ❄ ◎ ⊡ ⌖), such as Iosevka; DejaVu Sans Mono lacks ⌖, which most terminals then take from another font.
 - A Tesla account. Reading the car's information works out of the box and needs no extra API.
 - To send commands to the car, one of:
   - a [MyTeslaMate API](https://www.myteslamate.com/api/) token: a pay-as-you-go thingie, about 1 € for 500 commands per month. You *do not* need a "MyTeslaMate instance" subscription, just the API.
