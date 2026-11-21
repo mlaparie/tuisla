@@ -1073,15 +1073,17 @@ class TeslaClient:
 #  Logging
 # =============================================================================
 
-LOG_FILE = os.path.splitext(os.path.abspath(__file__))[0] + ".log"
+def log_file() -> str:
+    """The command log, kept with the tokens (it may hold addresses)."""
+    return token_path("tuisla.log")
 
 
 def log_cmd(ep: str, result: str) -> None:
     ts    = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     entry = f"{ts} - {ep} - {strip_ansi(result)}\n"
     try:
-        # Create the file if it doesn't exist, then append
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
+        os.makedirs(os.path.dirname(log_file()), mode=0o700, exist_ok=True)
+        with open(log_file(), "a", encoding="utf-8") as f:
             f.write(entry)
     except OSError:
         pass
@@ -2418,7 +2420,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "",
 def show_log_pager(term: Term, c: Colors) -> None:
     """Read tuisla.log and display it newest-first in the builtin pager."""
     try:
-        with open(LOG_FILE, "r", encoding="utf-8", errors="replace") as f:
+        with open(log_file(), "r", encoding="utf-8", errors="replace") as f:
             raw_lines = f.readlines()
     except OSError:
         raw_lines = []

@@ -10,6 +10,7 @@ folder private.
 | =refresh_token=                     | Your Tesla sign-in, from =--login-tesla=                             | Yes                                     |
 | =myteslamate_token=                 | MyTeslaMate API token, from =--login-mtm=                            | For mtm mode                            |
 | =access_token=                      | Cached Tesla access token, so starting skips a renewal               | No; deleted, it comes back              |
+| =tuisla.log=                        | Every command sent and its result (=z= shows it)                     | No                                      |
 | =last_data.json=                    | The last vehicle data, shown while the car sleeps or is out of reach | No; deleted, it comes back              |
 | =vc.json=                           | vc mode settings (developer app, domain, region, car)                | For vc mode                             |
 | =fleet_refresh_token=               | Fleet API sign-in, from =--setup-vc=                                 | For vc mode                             |
@@ -26,15 +27,10 @@ folder private.
 Or =$XDG_CACHE_HOME/tuisla/=.  Everything here can be deleted; tuisla
 remakes it when needed.
 
-| File                 | What it is                                                                       |
-|----------------------+----------------------------------------------------------------------------------|
-| =mapscii-0032cabb/=  | mapscii (pull request 161), fetched and built for =mapscii=                      |
+| File                 | What it is                                                                                     |
+|----------------------+------------------------------------------------------------------------------------------------|
+| =mapscii-0032cabb/=  | mapscii (pull request 161), fetched and built for =mapscii=                                    |
 | =superchargers.json= | Every Supercharger, from supercharge.info, for =mapscii country= and =world=; refreshed weekly |
-| =markers.geojson=    | The car and chargers last shown in mapscii                                       |
-| =map.html=           | The map last opened by =map chargers=                                            |
+| =markers.geojson=    | The car and chargers last shown in mapscii                                                     |
+| =map.html=           | The map last opened by =map chargers=                                                          |
 
-* Next to tuisla
-
-| File         | What it is                                       |
-|--------------+--------------------------------------------------|
-| =tuisla.log= | Every command sent and its result (=z= shows it) |
