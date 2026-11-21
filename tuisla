@@ -370,6 +370,28 @@ def read_char() -> str:
             return ch
 
 
+_KEY_SEQS = {"A": "k", "B": "j", "5~": "u", "6~": "d", "H": "g", "F": "G",
+             "1~": "g", "4~": "G", "7~": "g", "8~": "G"}
+
+
+def read_key(pager: bool = True) -> str:
+    """Like read_char, but the arrow keys (and PgUp/PgDn, Home/End) come back
+    as the pager's j/k (u/d, g/G), or as "" when typing (pager=False), like
+    other key sequences; a lone Esc stays Esc."""
+    import select as _sel
+    ch = read_char()
+    if ch != "\x1b" or not _sel.select([sys.stdin], [], [], 0.05)[0]:
+        return ch
+    if read_char() not in ("[", "O"):
+        return ""
+    seq = ""
+    while len(seq) < 8:
+        seq += read_char()
+        if "\x40" <= seq[-1] <= "\x7e":
+            break
+    return _KEY_SEQS.get(seq, "") if pager else ""
+
+
 # Inverted screen: dark text on a light background.  Drawn by tuisla itself
 # rather than with the terminal's screen-reverse mode (ESC [?5h), which tmux,
 # eat and others ignore.  Erasing also uses this background in those terminals.
@@ -1443,7 +1465,7 @@ def prompt_command(term: Term, c: Colors, st: "State") -> Optional[str]:
         if not r:
             break
 
-        ch = read_char()
+        ch = read_key(pager=False)
 
         if ch == "\x1b":
             erase_prompt()
@@ -2239,9 +2261,9 @@ def render_help(term: Term, c: Colors, st: State) -> None:
 #
 #  Pressing ? (or typing "help" at the : prompt) opens this.
 #  Runs a built-in pager:
-#    j/k   scroll 1 line down/up
-#    d/u   scroll half-page down/up
-#    g/G   jump to top/bottom
+#    j/k or ↓/↑         scroll 1 line down/up
+#    d/u or PgDn/PgUp   scroll half-page down/up
+#    g/G or Home/End    jump to top/bottom
 #    /     keyword search (regex, case-insensitive)
 #    n/N   next/previous search match
 #    z/q/Esc close
@@ -2321,7 +2343,7 @@ def _build_pager_lines(c: Colors) -> List[str]:
     lines: List[str] = []
     lines.append(
         f"  {c.B}{c.MAG}COMMANDS {c.R}  "
-        f"{c.GRY}?/q/Esc close  j/k scroll  d/u half-page  g/G top/bottom  /search  n/N match{c.R}"
+        f"{c.GRY}?/q/Esc close  j/k/↓/↑ scroll  d/u/PgDn/PgUp half-page  g/G top/bottom  /search  n/N match{c.R}"
     )
     lines.append("")
 
@@ -2394,7 +2416,7 @@ def _pager_input(term: Term, c: Colors, prompt: str) -> str:
             break
         if not r:
             break
-        ch = read_char()
+        ch = read_key(pager=False)
         if ch in ("\r", "\n"):
             break
         if ch == "\x1b":
@@ -2490,7 +2512,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "",
         bar_title = title or "pager"
         term.write(
             f"{c.REV} {bar_title}  {pct}%{patinfo}{minfo}"
-            f"  j/k d/u g/G  /search  n/N  {'Enter navigate  ' if picks else ''}{hints}q close {c.R}"
+            f"  j/k/↓/↑ d/u g/G  /search  n/N  {'Enter navigate  ' if picks else ''}{hints}q close {c.R}"
         )
         term.move(term_h - 1, 0)
         term.clear_line()
@@ -2505,7 +2527,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "",
         if not r:
             continue
 
-        ch = read_char()
+        ch = read_key()
         _, term_h = term.get_size()
         half = max(1, (term_h - 2) // 2)
 
@@ -2565,7 +2587,7 @@ def show_log_pager(term: Term, c: Colors) -> None:
 
     all_lines: List[str] = [
         f"  {c.B}{c.MAG}COMMAND LOG{c.R}  "
-        f"{c.GRY}newest first  z/q/Esc close  j/k scroll  d/u half-page  g/G top/bottom{c.R}",
+        f"{c.GRY}newest first  z/q/Esc close  j/k/↓/↑ scroll  d/u/PgDn/PgUp half-page  g/G top/bottom{c.R}",
         "",
     ]
 
@@ -2597,7 +2619,7 @@ def show_chargers_pager(term: Term, c: Colors, st: "State",
     all_lines: List[str] = [
         f"  {c.B}{c.MAG}CHARGERS WITHIN {range_text(st)}{c.R}  "
         + (f"{c.YLW}{position_age(st)}{c.R}  " if position_age(st) else "")
-        + f"{c.GRY}j/k select  Enter send to car  q close{c.R}", ""]
+        + f"{c.GRY}j/k/↓/↑ select  Enter send to car  q close{c.R}", ""]
     picked: Dict[int, Dict[str, Any]] = {}
     for title, key in (("Superchargers", "superchargers"), ("Destination", "destination_charging")):
         all_lines += ["", f"  {c.B}{c.MAG}{title}{c.R}"]
