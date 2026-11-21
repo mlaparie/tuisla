@@ -50,7 +50,7 @@ SCRIPT = [
     (14, [(0.8, ":")] + typed("mapscii globe", 0.1) + [(0.8, "Enter"), (5.0, "o")]
          + [(3.0, "Left")] + [(0.5, "Left")] * 6, 2.5),
     (None, [(0, "q"), (2.5, "q")], 1.0),
-    (15, [(0.8, "w"), (3.5, "w")], 3.0),
+    (15, [(0.8, "W"), (3.5, "W")], 3.0),
     (16, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
 ]   # the cast ends here, before anything quits, so a GIF of it loops cleanly
 

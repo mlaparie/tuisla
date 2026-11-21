@@ -36,13 +36,13 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car.
 
 ## Use
 
-`h` help · `?` all commands · `:` type a command · `w` keep the car awake · `q` quit
+`h` help · `?` all commands · `:` type a command · `w` wake the car · `W` keep it awake · `q` quit
 
 ## Modes
 
 - `--mode mtm` (default, recommended), commands are sent to the car through the MyTeslaMate API.
 - `--mode ro` (read-only), commands are checked for validity, but not sent.
-- `--mode vc`, commands are signed by tuisla itself with your own key, through Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy, and sent with your own Tesla developer app instead of MyTeslaMate. Run `./tuisla --setup-vc` once (it runs `tuisla-setup-vc`, which must sit next to `tuisla`): it walks you through every step (keys, publishing the public key on a free GitHub Pages site, the Tesla developer app, adding the key to the car from the Tesla app) and checks each one. It needs `openssl`, plus [Go](https://go.dev/) and git to build the proxy: on Guix or Nix it runs them in a temporary `guix shell` / `nix-shell`, elsewhere it offers to install them with your package manager (apt, dnf, pacman, zypper, apk, Homebrew or Termux) and to remove them again at the end, or you can install them yourself. You also need a payment card on the Tesla developer site; Tesla's $10 monthly credit covers a personal car. Once set up, vc mode also works without `--login-tesla`, but vehicle data then comes from the billed Fleet API, so tuisla refreshes every 60 s at most.
+- `--mode vc`, commands are signed by tuisla itself with your own key, through Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy, and sent with your own Tesla developer app instead of MyTeslaMate. Run `./tuisla --setup-vc` once (it runs `tuisla-setup-vc`, which must sit next to `tuisla`): it walks you through every step (keys, publishing the public key on a free GitHub Pages site, the Tesla developer app, adding the key to the car from the Tesla app) and checks each one. It needs `openssl`, plus [Go](https://go.dev/) and git to build the proxy: on Guix or Nix it runs them in a temporary `guix shell` / `nix-shell`, elsewhere it offers to install them with your package manager (apt, dnf, pacman, zypper, apk, Homebrew or Termux) and to remove them again at the end, or you can install them yourself. You also need a payment card on the Tesla developer site; Tesla's $10 monthly credit covers a personal car. When there is no internet route to the car (an underground car park, airplane mode), vc mode sends lock, unlock, allow driving, trunk, frunk, climate, charging and a few other commands over Bluetooth instead, with Tesla's `tesla-control`, which the setup builds too (on Linux it asks once for `sudo setcap cap_net_admin=eip` so it can use Bluetooth). Once set up, vc mode also works without `--login-tesla`, but vehicle data then comes from the billed Fleet API, so tuisla refreshes every 60 s at most.
 
 See `./tuisla --help` for more options.
 
@@ -56,7 +56,7 @@ Press `?` for the full list. Besides the usual lock, climate and charging comman
 - `chargers`: nearby Superchargers with free stalls and destination chargers; pick one with `j`/`k` and press Enter to send it to the car as the destination.
 - `route`: the destination, distance, arrival time and battery left at arrival. While a route is active the dashboard shows it too.
 
-The car cannot be put to sleep through the API, but it falls asleep on its own when nothing asks it for data for about 15 minutes. tuisla lets it by default: it only polls whether the car is awake, fetches data only while the car is driving, charging or conditioning (or when you press `r`), and wakes it only to deliver a command, after which it falls asleep again. Press `w` (or start with `-w`) to keep it awake instead; `:wake` wakes it once.
+The car cannot be put to sleep through the API, but it falls asleep on its own when nothing asks it for data for about 15 minutes. tuisla lets it by default: it only polls whether the car is awake, fetches data only while the car is driving, charging or conditioning (or when you press `r`), and wakes it only to deliver a command, after which it falls asleep again. `w` wakes it once and lets it fall asleep again; `W` (or starting with `-W`) keeps it awake. While the car is asleep or out of reach (an underground car park, say), the dashboard shows the last data tuisla saw, with its time at the top right.
 
 Not possible: Sentry Mode and dashcam clips are only stored on the car's USB drive, and the live Sentry camera view only works in Tesla's own app; no API gives access to them.
 

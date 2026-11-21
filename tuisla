@@ -514,6 +514,8 @@ class Frame:
 
 MSG_SECONDS = 3                  # a command's result stays at least this long
 ROUTE_WATCH = 120                # s to keep asking for the route after sending one
+WATCH       = 90                 # s to keep fetching after a command, until the car shows it
+WAKE_EVERY  = 30                 # s between wake requests while keeping an unreachable car awake
 
 _MIN_TERM_W = 64
 _MIN_TERM_H = 21
@@ -1066,6 +1068,7 @@ def log_cmd(ep: str, result: str) -> None:
 
 VC_CONFIG        = "vc.json"
 FLEET_TOKEN_FILE = "fleet_refresh_token"
+LAST_DATA_FILE   = "last_data.json"     # last vehicle data, shown while the car sleeps
 FLEET_TOKEN_URL  = "https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token"
 FLEET_REGIONS    = {"na": "https://fleet-api.prd.na.vn.cloud.tesla.com",
                     "eu": "https://fleet-api.prd.eu.vn.cloud.tesla.com"}
@@ -1085,12 +1088,73 @@ def load_vc_config() -> Dict[str, Any]:
         return {}
 
 
-def find_proxy() -> str:
+def find_go_tool(name: str) -> str:
     gopath = os.environ.get("GOPATH") or os.path.expanduser("~/go")
-    for cand in (shutil.which("tesla-http-proxy"), os.path.join(gopath, "bin", "tesla-http-proxy")):
+    for cand in (shutil.which(name), os.path.join(gopath, "bin", name)):
         if cand and os.access(cand, os.X_OK):
             return cand
     return ""
+
+
+def find_proxy() -> str:
+    return find_go_tool("tesla-http-proxy")
+
+
+# vc mode falls back to Bluetooth (tesla-control, from vehicle-command) when
+# the internet route fails, e.g. in an underground car park.  REST commands
+# and their tesla-control equivalents:
+_BLE_SIMPLE = {
+    "door_lock": "lock", "door_unlock": "unlock", "remote_start_drive": "drive",
+    "auto_conditioning_start": "climate-on", "auto_conditioning_stop": "climate-off",
+    "honk_horn": "honk", "flash_lights": "flash-lights", "wake_up": "wake",
+    "charge_start": "charging-start", "charge_stop": "charging-stop",
+    "charge_port_door_open": "charge-port-open", "charge_port_door_close": "charge-port-close",
+    "open_tonneau": "tonneau-open", "close_tonneau": "tonneau-close", "stop_tonneau": "tonneau-stop",
+    "media_toggle_playback": "media-toggle-playback", "media_next_track": "media-next-track",
+    "media_prev_track": "media-previous-track", "media_next_fav": "media-next-favorite",
+    "media_prev_fav": "media-previous-favorite", "media_volume_up": "media-volume-up",
+    "media_volume_down": "media-volume-down", "cancel_software_update": "software-update-cancel",
+}
+
+
+def ble_args(ep: str, body: Optional[Dict[str, Any]]) -> List[str]:
+    """tesla-control arguments for a command, or [] if it has none."""
+    b = body or {}
+    onoff = "on" if b.get("on") or b.get("enable") else "off"
+    if ep in _BLE_SIMPLE:
+        return [_BLE_SIMPLE[ep]]
+    return {
+        "actuate_trunk":     ["frunk-open" if b.get("which_trunk") == "front" else "trunk-open"],
+        "window_control":    ["windows-vent" if b.get("command") == "vent" else "windows-close"],
+        "set_sentry_mode":   ["sentry-mode", onoff],
+        "guest_mode":        ["guest-mode-" + onoff],
+        "set_charge_limit":  ["charging-set-limit", str(b.get("percent"))],
+        "set_charging_amps": ["charging-set-amps", str(b.get("charging_amps"))],
+        "set_temps":         ["climate-set-temp", f"{b.get('driver_temp')}c"],
+        "adjust_volume":     ["media-set-volume", str(b.get("volume"))],
+        "remote_steering_wheel_heater_request": ["steering-wheel-heater", onoff],
+        "set_valet_mode":    ["valet-mode-on", str(b.get("password"))] if b.get("on") else ["valet-mode-off"],
+    }.get(ep, [])
+
+
+def ble_command(st: "State", ep: str, body: Optional[Dict[str, Any]]) -> Optional[Tuple[bool, str]]:
+    """Send a command over Bluetooth; None if that is not possible."""
+    tool, args = find_go_tool("tesla-control"), ble_args(ep, body)
+    if not tool or not args or not os.path.exists(vc_file("private.pem")):
+        return None
+    if st.notify:
+        st.notify("Network failed, trying Bluetooth…")
+    try:
+        out = subprocess.run([tool, "-ble", "-vin", st.target_vin, "-key-file", vc_file("private.pem"),
+                              "-session-cache", vc_file("ble-session.json"), *args],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return False, f"Bluetooth: {e}"
+    if out.returncode == 0:
+        return True, ""
+    if "CAP_NET_ADMIN" in out.stderr:
+        return False, f"Bluetooth needs: sudo setcap cap_net_admin=eip {tool}"
+    return False, "Bluetooth: " + ((out.stderr.strip().splitlines() or ["failed"])[-1])[:150]
 
 
 def fleet_client(cfg: Dict[str, Any], refresh_token: str) -> TeslaClient:
@@ -1200,6 +1264,7 @@ def wake_for_command(client: TeslaClient, st: "State") -> bool:
     on its own afterwards.  Returns False if it stays asleep."""
     if jget(st.last_data or {}, "response.state", "online") == "online":
         return True
+    failures = 0
     for i in range(20):
         if i % 5 == 0:
             client.wake_up(st.vid)
@@ -1209,8 +1274,11 @@ def wake_for_command(client: TeslaClient, st: "State") -> bool:
             if client.get_state(st.vid) == "online":
                 st.last_data["response"]["state"] = "online"
                 return True
+            failures = 0
         except Exception:
-            pass
+            failures += 1
+            if failures == 3:               # no network: waiting is pointless
+                return False
         time.sleep(2)
     return False
 
@@ -1228,7 +1296,9 @@ def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
     if not st.target_vin:
         return done(False, "X TESLA_VIN missing")
     vin = urllib.parse.quote(st.target_vin)
-    if ep != "wake_up" and not wake_for_command(client, st):
+    # Over Bluetooth the car wakes up by itself, so vc mode goes on and lets
+    # the internet route fail into the Bluetooth one.
+    if ep != "wake_up" and not wake_for_command(client, st) and st.mode != "vc":
         return done(False, "X the car did not wake up")
 
     try:
@@ -1249,7 +1319,14 @@ def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
         else:
             if st.vc is None:
                 return done(False, "X vc mode is not set up (run: tuisla --setup-vc)")
-            resp = st.vc.command(vin, ep, body)
+            try:
+                resp = st.vc.command(vin, ep, body)
+            except Exception as e:
+                ble = ble_command(st, ep, body)
+                if ble is None:
+                    raise
+                return done(ble[0], f"✓ {label} (Bluetooth)" if ble[0]
+                            else f"X {ble[1]} (internet: {api_error(e)[:50]})")
     except Exception as e:
         return done(False, f"X {api_error(e)[:180]}")
 
@@ -1796,6 +1873,8 @@ class State:
     last_data: Optional[Dict[str, Any]] = None   # last vehicle_data shown, for set_temps
     data_at: float = 0.0         # when last_data was fetched
     route_until: float = 0.0     # ask for the location (and route) until then
+    watch_until: float = 0.0     # fetch data until then even if the car may sleep (after a command)
+    status: str = ""             # shown on the message line while nothing else is
     let_sleep: bool = True       # only poll the state while the car is idle, so it can sleep
     notify: Optional[Callable[[str], None]] = None   # shows progress on the message line
 
@@ -1821,7 +1900,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     frame.row2(c, kcap("r", "refresh"),     "", kcap("s", "style"),    "")
     frame.row2(c, kcap("-", "refresh -5s"), "", kcap("i", "invert"),   "")
     frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
-    frame.row2(c, kcap("q", "quit"),        "", kcap("w", "sleep/awake"), "")
+    frame.row2(c, kcap("q", "quit"),        "", kcap("W", "keep awake"), "")
 
     cmd_frame = Frame(content_w=content_w, lbl_w=lbl_w)
     cmd_frame.section(c, "COMMANDS")
@@ -1829,8 +1908,9 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     cmd_frame.row2(c, kcap("L", "unlock"),      "", kcap("o", "open port"),    "")
     cmd_frame.row2(c, kcap("l", "lock"),        "", kcap("p", "charge start"), "")
     cmd_frame.row2(c, kcap("C", "climate on"),  "", kcap("P", "charge stop"),  "")
-    cmd_frame.row2(c, kcap("c", "climate off"), "", kcap(":", "enter command"),"")
-    cmd_frame.row2(c, kcap("?", "all commands"), "", kcap("z", "show log"),   "")
+    cmd_frame.row2(c, kcap("c", "climate off"), "", kcap("w", "wake"),         "")
+    cmd_frame.row2(c, kcap(":", "enter command"), "", kcap("?", "all commands"), "")
+    cmd_frame.row1(c, kcap("z", "show log"), "")
 
     frame.maxvis = max(frame.maxvis, cmd_frame.maxvis)
 
@@ -1838,11 +1918,10 @@ def render_help(term: Term, c: Colors, st: State) -> None:
         frame.fline(s)
 
     frame.blank()
-    frame.row2(c, "mode:",    f"{c.GRY}{st.mode}{c.R}",
+    frame.row2(c, "mode:",    f"{c.GRY}{st.mode}{'' if st.let_sleep else ', awake'}{c.R}",
                   "style:",   f"{c.GRY}{'fancy' if c.fancy else 'minimal'}{c.R}")
     frame.row2(c, "refresh:", f"{c.GRY}{st.refresh_interval}s{c.R}",
                   "colors:",  f"{c.GRY}{'inv' if c.inverted else 'normal'}{'/bw' if c.bw else '/col'}{c.R}")
-    frame.row2(c, "sleep:",   f"{c.GRY}{'when idle' if st.let_sleep else 'kept awake'}{c.R}", "", "")
     frame.blank()
     frame.row1(c, f"{c.GRY}h close help{c.R}", "")
 
@@ -2292,7 +2371,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
 
     sc = c.GRN
     if state in ("asleep", "offline"): sc = c.GRY
-    if state == "charging":            sc = c.YLW
+    if state in ("charging", "waking"): sc = c.YLW
 
     bat_bar = make_bat_bar(c, bat)
 
@@ -2384,7 +2463,8 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     frame.cat_labels = False
     if st.cmd_msg_at and time.time() - st.cmd_msg_at >= MSG_SECONDS:
         st.cmd_msg, st.cmd_msg_at = "", 0.0
-    frame.row1(c, st.cmd_msg if st.cmd_msg else f"{c.GRY}h help{c.R}", "")
+    frame.row1(c, st.cmd_msg or (f"h help    {c.YLW}{st.status}{c.R}" if st.status
+                                 else f"{c.GRY}h help{c.R}"), "")
 
     w_local       = min(frame.maxvis, term_w)
     st.prompt_col = max(0, (term_w - w_local) // 2) + 2 + 9 + 1   # margin + indent + lbl_w + space
@@ -2483,12 +2563,12 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
         st.unit = "us" if st.unit == "metric" else "metric"
         return False
 
-    if key == "w":
+    if key == "W":
         st.let_sleep = not st.let_sleep
-        st.cmd_msg = (f"h help    {c.GRN}✓ The car may sleep when idle (:wake wakes it){c.R}"
+        st.cmd_msg = (f"h help    {c.GRN}✓ The car may sleep when idle (w wakes it){c.R}"
                       if st.let_sleep else f"h help    {c.GRN}✓ Keeping the car awake{c.R}")
         st.cmd_msg_at = 0.0
-        return False
+        return not st.let_sleep             # keeping it awake starts at once
 
     if key == "s":
         c.fancy = not c.fancy
@@ -2509,12 +2589,15 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
         return False
 
     # Command hotkeys -- only when the help overlay is closed
-    if not st.show_help and (key in HOTKEYS or key == ":"):
+    if not st.show_help and (key in HOTKEYS or key in (":", "w")):
         if key == ":":
             st.cmd_msg = parse_and_run_cmd(term, c, client, st)
+        elif key == "w":                    # wake once; it falls asleep again later
+            st.cmd_msg = run_cmd(client, st, "wake_up", "Waking the car", None, c)
         else:
             st.cmd_msg = run_cmd(client, st, *HOTKEYS[key], None, c)
         st.cmd_msg_at = 0.0                 # a new message starts its own 3 s
+        st.watch_until = time.time() + WATCH
         return True                         # force immediate refresh after any command
 
     return False
@@ -2532,7 +2615,7 @@ def main() -> int:
     ap.add_argument("-r", "--refresh", type=int, default=5, metavar="SECONDS",
                     help="Refresh interval in s (default: 5)")
     ap.add_argument("-i", "--invert",  action="store_true")
-    ap.add_argument("-w", "--keep-awake", action="store_true",
+    ap.add_argument("-W", "--keep-awake", action="store_true",
                     help="Keep the car awake instead of letting it sleep when idle")
     ap.add_argument("-s", "--simple",  action="store_true", help="Disable fancy style")
     ap.add_argument("-c", "--color",   action="store_true", help="Enable colors (default: off)")
@@ -2668,6 +2751,25 @@ def main() -> int:
         data: Optional[Dict[str, Any]] = None
         _wake_attempt = 0   # counts consecutive failed wake cycles
         forced = True       # fetch now: at start, after r or a command
+        last_wake = 0.0
+        poll = 3 if refresh_token else 10   # s between tries while waking (billed without)
+
+        # The last data seen, kept so that a sleeping or unreachable car (an
+        # underground car park) still shows its last known state.
+        try:
+            saved = json.loads(load_token(LAST_DATA_FILE) or "{}")
+        except ValueError:
+            saved = {}
+        if jget(saved, "data.response.vin") == st.target_vin:
+            data, st.data_at = saved["data"], float(saved.get("at") or 0)
+
+        def keep(new: Dict[str, Any]) -> Dict[str, Any]:
+            st.data_at = time.time()
+            try:
+                save_token(json.dumps({"at": st.data_at, "data": new}), LAST_DATA_FILE)
+            except OSError:
+                pass
+            return new
 
         while True:
             if st.let_sleep:
@@ -2676,91 +2778,60 @@ def main() -> int:
                 try:
                     state = client.get_state(vid)
                 except Exception:
-                    state = "unknown"
+                    state = "unreachable"           # no network, here or at the car
                 new = None
                 # Also right after sending a destination: the car takes a
                 # moment to compute the route.
                 if state == "online" and (forced or data is None or car_busy(data)
-                                          or time.time() < st.route_until):
+                                          or time.time() < max(st.route_until, st.watch_until)):
                     try:
                         new = client.get_vehicle_data(vid, wants_location(st))
                     except Exception:
                         pass
                 if new:
-                    data, st.data_at = new, time.time()
+                    data = keep(new)
                 elif data:
                     data["response"]["state"] = state
                 else:
                     data = {"response": {"vin": st.target_vin, "state": state}}
             else:
-                # ── Try a quick data fetch first (car may already be awake) ──
                 try:
                     new = client.get_vehicle_data(vid, wants_location(st))
                 except Exception:
                     new = None
-
-                if not new:
-                    _wake_attempt += 1
-                    term.home(); term.clear_to_end()
-
-                    # Refresh the access token in case it expired while asleep
-                    try:
-                        client.refresh_access_token()
-                    except Exception as e:
-                        term.write(f"{c.YLW}Token refresh failed: {e!s:.60}  retrying…{c.R}\n")
-                        time.sleep(5)
-                        continue
-
-                    # Send wake command (best-effort; car may already be waking)
-                    try:
-                        term.write(f"{c.YLW}Waking vehicle (attempt {_wake_attempt})…{c.R}\n")
-                        client.wake_up(vid)
-                    except Exception as e:
-                        term.write(f"{c.YLW}Wake request failed: {e!s:.60}{c.R}\n")
-                        # Don't give up — network may still be coming up; keep polling
-
-                    # Poll for up to 60 s before declaring this cycle failed
-                    # (less often when each request is billed)
-                    poll = 3 if refresh_token else 10
-                    for i in range(60 // poll):
-                        time.sleep(poll)
-                        term.home(); term.clear_to_end()
-                        term.write(
-                            f"{c.YLW}Waiting for vehicle"
-                            f" (cycle {_wake_attempt}, {(i+1)*poll}s)…{c.R}\n"
-                        )
+                if new:
+                    _wake_attempt, st.status = 0, ""
+                    data = keep(new)
+                else:
+                    # Asleep or out of reach: keep showing the last data and
+                    # ask the car to wake up every WAKE_EVERY s.
+                    if time.time() - last_wake >= WAKE_EVERY:
+                        _wake_attempt += 1
+                        last_wake = time.time()
                         try:
-                            new = client.get_vehicle_data(vid)
-                            if new:
-                                break
-                        except Exception:
-                            pass
-
-                if not new:
-                    # Exponential-ish backoff between wake cycles, capped at 30 s
-                    backoff = min(30, 5 * _wake_attempt)
-                    term.home(); term.clear_to_end()
-                    term.write(
-                        f"{c.YLW}Vehicle unreachable after cycle {_wake_attempt}."
-                        f" Retrying in {backoff}s…{c.R}\n"
-                    )
-                    time.sleep(backoff)
-                    continue
-
-                _wake_attempt = 0   # reset on successful data fetch
-                data, st.data_at = new, time.time()
+                            try:
+                                client.api_post(f"{client.api_base}/vehicles/{vid}/wake_up")
+                            except RuntimeError:
+                                client.refresh_access_token()   # it may have expired meanwhile
+                                client.wake_up(vid)
+                            st.status = f"Waking the car (attempt {_wake_attempt})…"
+                        except Exception as e:
+                            st.status = f"Car unreachable: {api_error(e)[:50]}"
+                    if data is None:
+                        data = {"response": {"vin": st.target_vin}}
+                    data["response"]["state"] = "waking"
 
             st.last_data = data
             while True:
                 if st.show_help:
                     render_help(term, c, st)
-                elif "charge_state" not in data["response"]:    # asleep since start: no data yet
+                elif "charge_state" not in data["response"]:    # no data seen yet
                     term.home(); term.clear_to_end()
-                    term.write(f"Vehicle {data['response']['state']}, left to sleep."
-                               f"  w: wake it and keep it awake  :  command  q: quit\n")
+                    term.write((st.status or f"Vehicle {data['response']['state']}, left to sleep")
+                               + "  (w: wake it, W: keep it awake, q: quit)\n")
                 else:
                     render_dashboard(term, c, st, data)
-                key = term.read_key_timeout(st.refresh_interval)
+                key = term.read_key_timeout(poll if st.status else st.refresh_interval)
                 if handle_key(term, c, st, client, key):
                     forced = key is not None
                     if forced and not st.show_help and "charge_state" in data["response"]:

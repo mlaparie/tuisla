@@ -20,7 +20,7 @@ STEPS = [
     ("Chargers",            ":",     "Nearby chargers; j/k pick one, Enter sends it to the car as the destination."),
     ("Terminal map",        ":",     "mapscii chargers: the car and the chargers on a map in the terminal (mapscii)."),
     ("  Globe view",        "o",     "mapscii globe, then o: the same markers on a 3D globe; arrows rotate it, q goes back."),
-    ("Sleep",               "w",     "The car may sleep when idle (default); w keeps it awake."),
+    ("Sleep",               "W",     "The car may sleep when idle (default); W keeps it awake, w wakes it once."),
     ("Modes",               "m",     "ro -> mtm (MyTeslaMate API) -> vc (own key, via vehicle-command)."),
 ]
 KEY_NAMES = {"Enter": "⏎", "Tab": "Tab", " ": "␣", "Left": "←"}

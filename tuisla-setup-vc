@@ -36,7 +36,7 @@ _loader.exec_module(tuisla)
 
 from tuisla import (AUTHORIZE_URL, FLEET_REGIONS, FLEET_TOKEN_FILE, FLEET_TOKEN_URL,  # noqa: E402
                     VC_CONFIG, TeslaClient, VcBackend, _b64url, api_error, auth_post,
-                    find_proxy, fleet_client, jget, load_token, load_vc_config,
+                    find_go_tool, find_proxy, fleet_client, jget, load_token, load_vc_config,
                     parse_callback, save_token, token_path, vc_file)
 
 FLEET_SCOPES     = "openid offline_access vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds"
@@ -46,7 +46,10 @@ CALLBACK_PAGE    = "tuisla-callback.html"
 # so it is built from a clone.
 PROXY_REPO       = "https://github.com/teslamotors/vehicle-command.git"
 PROXY_BUILD      = (f"git clone --depth 1 {PROXY_REPO} vehicle-command &&\n"
-                    "       go -C vehicle-command install ./cmd/tesla-http-proxy")
+                    "       go -C vehicle-command install ./cmd/tesla-http-proxy ./cmd/tesla-control")
+# tesla-http-proxy signs commands sent over the internet; tesla-control sends
+# them over Bluetooth when there is no internet route.
+GO_TOOLS         = ("tesla-http-proxy", "tesla-control")
 
 _CALLBACK_HTML = """<!doctype html>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width">
@@ -158,8 +161,9 @@ def setup_vc() -> int:
     try:
         # ── 1. Tools ───────────────────────────────────────────────────────
         step(1, "tools")
+        missing = [t for t in GO_TOOLS if not find_go_tool(t)]
         need = [t for t in ("openssl", "go", "git")
-                if not shutil.which(t) and (t == "openssl" or not find_proxy())]
+                if not shutil.which(t) and (t == "openssl" or missing)]
         source = tool_source() if need else ""
         if need and source in ("guix", "nix"):
             via = "guix shell" if source == "guix" else "nix-shell"
@@ -180,20 +184,31 @@ def setup_vc() -> int:
                   "    Termux: pkg install openssl-tool            macOS: already installed")
             return 1
         print("✓ openssl")
-        if find_proxy():
-            print(f"✓ tesla-http-proxy ({find_proxy()})")
-        elif have("go") and have("git"):
-            print("tesla-http-proxy (Tesla's command signer) is not installed.")
-            if yes("Build it now from Tesla's vehicle-command repository?"):
+        if missing and have("go") and have("git"):
+            print(f"{' and '.join(missing)} (Tesla's command signers, for the internet and\n"
+                  "Bluetooth) not installed.")
+            if yes("Build them now from Tesla's vehicle-command repository?"):
                 print("Building (a minute or two)…")
                 with tempfile.TemporaryDirectory() as tmp:
                     src = os.path.join(tmp, "vehicle-command")
-                    if (run(["git", "clone", "-q", "--depth", "1", PROXY_REPO, src])
-                            and run(["go", "-C", src, "install", "./cmd/tesla-http-proxy"]) and find_proxy()):
-                        print(f"✓ tesla-http-proxy ({find_proxy()})")
+                    if run(["git", "clone", "-q", "--depth", "1", PROXY_REPO, src]):
+                        run(["go", "-C", src, "install"] + [f"./cmd/{t}" for t in missing])
+        for t in GO_TOOLS:
+            if find_go_tool(t):
+                print(f"✓ {t} ({find_go_tool(t)})")
+        ble = find_go_tool("tesla-control")
+        if ble and sys.platform.startswith("linux") and not os.environ.get("TERMUX_VERSION"):
+            # Linux only lets it use Bluetooth with this capability (or as root).
+            caps = subprocess.run(["getcap", ble], capture_output=True, text=True).stdout \
+                if shutil.which("getcap") else ""
+            if "cap_net_admin" not in caps and yes(
+                    "Allow tesla-control to use Bluetooth, for when there is no internet\n"
+                    f"  route to the car (runs: sudo setcap cap_net_admin=eip {ble})?"):
+                subprocess.run(["sudo", "setcap", "cap_net_admin=eip", ble])
         if not find_proxy():
             print("! tesla-http-proxy is missing; it is only needed at the very end, so you\n"
-                  "  can carry on and install it meanwhile.  It is built with Go and git:\n"
+                  "  can carry on and install it meanwhile.  It and tesla-control (the\n"
+                  "  Bluetooth fallback) are built with Go and git:\n"
                   "    1. Install them:  Debian/Ubuntu: sudo apt install golang git   Fedora: sudo dnf install golang git\n"
                   "                      Arch: sudo pacman -S go git   Guix: guix install go git\n"
                   "                      macOS: brew install go git   Termux: pkg install golang git\n"
