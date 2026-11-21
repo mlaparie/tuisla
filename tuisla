@@ -59,6 +59,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import secrets
 import shlex
@@ -254,7 +255,7 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("mapscii",                 "_mapscii",                         None,                                       "Show the car on a map in the terminal (mapscii)"),
     ("mapscii chargers",        "_mapscii_chargers",                None,                                       "Show the car and nearby chargers in the terminal (mapscii)"),
     ("mapscii country",         "_mapscii_country",                 None,                                       "Superchargers of the car's country, or another (mapscii country Spain)"),
-    ("mapscii world",           "_mapscii_world",                   None,                                       "Every Supercharger in the world (supercharge.info); o: 3D globe"),
+    ("mapscii world",           "_mapscii_world",                   None,                                       "Every Supercharger in the world (supercharge.info), on a 3D globe"),
     ("chargers",                "_chargers",                        None,                                       "Chargers within the car's range, or km (chargers 50); Enter sends one"),
     ("route",                   "_route",                           None,                                       "Show the destination, arrival time and energy"),
 ]
@@ -1320,6 +1321,19 @@ def wake_for_command(client: TeslaClient, st: "State") -> bool:
 
 def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
             body: Optional[Dict[str, Any]], c: Colors) -> str:
+    """Send a command; in live mode it is queued and sent in the background,
+    and the message line shows its result when it comes."""
+    if st.jobs is None or client is None or st.mode == "ro":
+        return send_cmd(client, st, ep, label, body, c)
+    def job() -> None:
+        st.cmd_msg, st.cmd_msg_at = send_cmd(client, st, ep, label, body, c), 0.0
+    st.pending += 1
+    st.jobs.put(job)
+    return f"h help    {c.YLW}… {label}{c.R}"
+
+
+def send_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
+             body: Optional[Dict[str, Any]], c: Colors) -> str:
     def done(ok: bool, msg: str) -> str:
         log_cmd(ep, msg)
         return f"h help    {c.GRN if ok else c.RED}{msg}{c.R}"
@@ -1638,6 +1652,42 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
     return run_cmd(client, st, best_ep, label, body, c)
 
 
+ROUTE_EVERY = 300                # s between route updates through the Fleet API while one is set
+
+
+def fetch_route(client: TeslaClient, st: "State") -> None:
+    """The Owner API data has no route (active_route_*), so ask the Fleet API
+    for it: through MyTeslaMate in mtm mode, through our own app in vc mode."""
+    path = (f"/vehicles/{urllib.parse.quote(st.target_vin)}/vehicle_data?endpoints="
+            + urllib.parse.quote("location_data"))
+    st.route_at = time.time()
+    try:
+        if st.mode == "mtm" and st.myteslamate_token:
+            try:
+                resp = client._request("GET", MTM_API + path, None, None, st.myteslamate_token)
+            except RuntimeError as e:
+                if not str(e).startswith(("HTTP 401", "HTTP 403")):
+                    raise
+                resp = client._request("GET", f"{MTM_API}{path}&token="
+                                       + urllib.parse.quote(st.myteslamate_token), None, None, "")
+        elif st.mode == "vc" and st.vc is not None:
+            resp = st.vc.client.api_get(path)
+        else:
+            return
+    except Exception as e:
+        log_cmd("route", f"X {api_error(e)[:150]}")
+        return
+    ds = jget(resp, "response.drive_state", {}) or {}
+    st.route = {k: v for k, v in ds.items() if k.startswith("active_route_")} \
+        if ds.get("active_route_destination") else {}
+
+
+def route_fields(st: "State", data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """active_route_* from the car's data, else from the last fetch_route."""
+    ds = jget(data or st.last_data or {}, "response.drive_state", {}) or {}
+    return ds if ds.get("active_route_destination") else st.route
+
+
 def car_busy(data: Dict[str, Any]) -> bool:
     """Driving, charging, conditioning or someone inside: no sleep coming."""
     r = data.get("response") or {}
@@ -1650,7 +1700,7 @@ def wants_location(st: "State") -> bool:
     """Ask for the location with the data while driving or following a route."""
     ds = jget(st.last_data or {}, "response.drive_state", {}) or {}
     return (time.time() < st.route_until or ds.get("shift_state") in ("D", "R", "N")
-            or bool(ds.get("active_route_destination")))
+            or bool(route_fields(st)))
 
 
 def car_location(client: Optional[TeslaClient], st: "State",
@@ -1719,6 +1769,7 @@ def mapscii_command() -> List[str]:
                           "tuisla", f"mapscii-{MAPSCII_COMMIT[:8]}")
     bundle = os.path.join(cache, "dist", "mapscii.mjs")   # it finds ../styles from there
     if os.path.exists(bundle):
+        patch_mapscii(bundle)
         return ["node", bundle]
     if not shutil.which("git"):
         raise RuntimeError("mapscii needs git to fetch mapscii")
@@ -1743,7 +1794,22 @@ def mapscii_command() -> List[str]:
     os.makedirs(os.path.dirname(bundle), exist_ok=True)
     with open(bundle, "w", encoding="utf-8") as f:
         f.write(code)
+    patch_mapscii(bundle)
     return ["node", bundle]
+
+
+def patch_mapscii(bundle: str) -> None:
+    """mapscii has no option to start in its globe view, so this adds one:
+    MAPSCII_GLOBE=1 opens it once the map is up, as if o was pressed."""
+    with open(bundle, encoding="utf-8") as f:
+        code = f.read()
+    hook = "    if (this.locateOnStart) {"
+    if "MAPSCII_GLOBE" in code or hook not in code:
+        return
+    code = code.replace(hook, "    if (process.env.MAPSCII_GLOBE) setTimeout(() => void this._handleGlobeView(), 300);\n"
+                        + hook, 1)
+    with open(bundle, "w", encoding="utf-8") as f:
+        f.write(code)
 
 
 DEFAULT_RANGE_KM = 100            # chargers range when the car's range is unknown
@@ -1884,7 +1950,8 @@ def fit_zoom(points: List[Tuple[str, float, float, str]], cols: int, rows: int) 
 
 
 def run_mapscii(term: Term, c: Colors, points: List[Tuple[str, float, float, str]],
-                zoom: Optional[float], fit: Optional[List[Tuple[str, float, float, str]]] = None) -> str:
+                zoom: Optional[float], fit: Optional[List[Tuple[str, float, float, str]]] = None,
+                globe: bool = False) -> str:
     """Show the points in mapscii, in place of the dashboard until it quits:
     around the first one at that zoom, or all of them if zoom is None.  It
     draws on tuisla's screen, which is cleared afterwards, so no map is left
@@ -1901,7 +1968,8 @@ def run_mapscii(term: Term, c: Colors, points: List[Tuple[str, float, float, str
     term.disable_raw(); term.invert_screen(False); term.home(); term.clear_to_end(); term.cursor(True)
     try:
         subprocess.run(with_node(mapscii_command() + ["--lat", str(lat), "--lon", str(lon),
-                                                      "--zoom", str(zoom), "--geojson", path]))
+                                                      "--zoom", str(zoom), "--geojson", path]),
+                       env={**os.environ, "MAPSCII_GLOBE": "1"} if globe else None)
     except (OSError, RuntimeError) as e:
         return f"h help    {c.RED}X {str(e)[:180]}{c.R}"
     finally:
@@ -1913,7 +1981,7 @@ def run_mapscii(term: Term, c: Colors, points: List[Tuple[str, float, float, str
 
 def route_summary(st: "State") -> str:
     """'Monterey, CA, 115 km, 15:42 (+6 min traffic), 41% left' from the last data."""
-    ds   = jget(st.last_data or {}, "response.drive_state", {}) or {}
+    ds   = route_fields(st)
     dest = ds.get("active_route_destination")
     if not dest:
         return ""
@@ -1938,14 +2006,13 @@ def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
 
     if ep == "_route":
         car_location(client, st, fresh=True)
+        if client is not None:
+            fetch_route(client, st)
         st.route_until = time.time() + ROUTE_WATCH
         route = route_summary(st)
         if route:
             return f"h help    {c.GRN}✓ Route: {route}{c.R}"
-        # What the car did send, to see whether route fields exist at all.
-        keys = sorted(jget(st.last_data or {}, "response.drive_state", {}) or {})
-        log_cmd("route", "no active route; drive_state has: " + ", ".join(keys))
-        return f"h help    {c.GRY}No active route (what the car sent is in the log: z){c.R}"
+        return f"h help    {c.GRY}No active route{c.R}"
 
     lat, lon = car_location(client, st)
     car = ("car", lat, lon, str(jget(st.last_data or {}, "response.vehicle_state.vehicle_name", "") or "car"))
@@ -1966,7 +2033,7 @@ def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
             return fail(f"supercharge.info: {e}")
         mine = [car] if lat is not None else []
         if ep == "_mapscii_world":
-            return run_mapscii(term, c, mine + [site_point(x) for x in sites], 0)
+            return run_mapscii(term, c, mine + [site_point(x) for x in sites], 0, globe=True)
         country = st.map_country
         if not country:                     # the car's: that of the nearest Supercharger
             if lat is None:
@@ -2041,8 +2108,12 @@ class State:
     last_data: Optional[Dict[str, Any]] = None   # last vehicle_data shown, for set_temps
     data_at: float = 0.0         # when last_data was fetched
     route_until: float = 0.0     # ask for the location (and route) until then
+    route: Dict[str, Any] = dataclasses.field(default_factory=dict)  # active_route_* from fetch_route
+    route_at: float = 0.0        # when fetch_route last ran
     watch_until: float = 0.0     # fetch data until then even if the car may sleep (after a command)
     status: str = ""             # shown on the message line while nothing else is
+    jobs: Any = None             # queue of commands sent in the background (live mode)
+    pending: int = 0             # commands queued or being sent
     let_sleep: bool = True       # only poll the state while the car is idle, so it can sleep
     charger_range_km: Optional[float] = None     # chargers range in km; None: the car's range
     map_country: str = ""        # mapscii country's argument; "": the car's country
@@ -2618,7 +2689,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     frame.row2(c, "R right", tyre(rr), "Valet",  f"{vl_c}{vl_l}{c.R}")
 
     # The route, when there is one and the window has room for it.
-    ds = jget(data, "response.drive_state", {}) or {}
+    ds = route_fields(st, data)
     if ds.get("active_route_destination") and len(frame.lines) + 6 <= term_h:
         frame.cat_labels = False
         frame.section(c, f"{px_nav}ROUTE")
@@ -2638,7 +2709,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
 
     frame.blank()
     frame.cat_labels = False
-    if st.cmd_msg_at and time.time() - st.cmd_msg_at >= MSG_SECONDS:
+    if st.cmd_msg_at and not st.pending and time.time() - st.cmd_msg_at >= MSG_SECONDS:
         st.cmd_msg, st.cmd_msg_at = "", 0.0
     frame.row1(c, st.cmd_msg or (f"h help    {c.YLW}{st.status}{c.R}" if st.status
                                  else f"{c.GRY}h help{c.R}"), "")
@@ -2911,9 +2982,10 @@ def main() -> int:
             vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
         st.vid   = vid
 
-        def notify(msg: str) -> None:
-            term.move(st.prompt_row, 0); term.clear_line()
-            term.write(" " * max(0, st.prompt_col - 10) + f"{c.YLW}{msg}{c.R}")
+        dirty = threading.Event()           # new data or message: redraw
+        def notify(msg: str) -> None:       # called from the background threads
+            st.cmd_msg = f"h help    {c.YLW}{msg}{c.R}"
+            dirty.set()
         st.notify = notify
 
         if not st.target_vin and vin:
@@ -2924,9 +2996,6 @@ def main() -> int:
             raise RuntimeError("No vehicle found -- check TESLA_VIN or token")
 
         data: Optional[Dict[str, Any]] = None
-        _wake_attempt = 0   # counts consecutive failed wake cycles
-        forced = True       # fetch now: at start, after r or a command
-        last_wake = 0.0
         poll = 3 if refresh_token else 10   # s between tries while waking (billed without)
 
         # The last data seen, kept so that a sleeping or unreachable car (an
@@ -2937,6 +3006,7 @@ def main() -> int:
             saved = {}
         if jget(saved, "data.response.vin") == st.target_vin:
             data, st.data_at = saved["data"], float(saved.get("at") or 0)
+        st.last_data = data
 
         def keep(new: Dict[str, Any]) -> Dict[str, Any]:
             st.data_at = time.time()
@@ -2946,7 +3016,13 @@ def main() -> int:
                 pass
             return new
 
-        while True:
+        # The car is asked for data in the background, so that keys always
+        # answer at once; fetch_now makes it ask right away.
+        fetch_now = threading.Event()
+        wake = {"attempt": 0, "last": 0.0}
+
+        def fetch(forced: bool) -> None:
+            data = st.last_data
             if st.let_sleep:
                 # Only the state is polled while the car is idle, so that it can
                 # fall asleep; it is never woken up from here.
@@ -2955,8 +3031,8 @@ def main() -> int:
                 except Exception:
                     state = "unreachable"           # no network, here or at the car
                 new = None
-                # Also right after sending a destination: the car takes a
-                # moment to compute the route.
+                # Also right after a command or a destination: the car takes a
+                # moment to show it.
                 if state == "online" and (forced or data is None or car_busy(data)
                                           or time.time() < max(st.route_until, st.watch_until)):
                     try:
@@ -2975,45 +3051,85 @@ def main() -> int:
                 except Exception:
                     new = None
                 if new:
-                    _wake_attempt, st.status = 0, ""
+                    wake["attempt"], st.status = 0, ""
                     data = keep(new)
                 else:
                     # Asleep or out of reach: keep showing the last data and
                     # ask the car to wake up every WAKE_EVERY s.
-                    if time.time() - last_wake >= WAKE_EVERY:
-                        _wake_attempt += 1
-                        last_wake = time.time()
+                    if time.time() - wake["last"] >= WAKE_EVERY:
+                        wake["attempt"] += 1
+                        wake["last"] = time.time()
                         try:
                             try:
                                 client.api_post(f"{client.api_base}/vehicles/{vid}/wake_up")
                             except RuntimeError:
                                 client.refresh_access_token()   # it may have expired meanwhile
                                 client.wake_up(vid)
-                            st.status = f"Waking the car (attempt {_wake_attempt})…"
+                            st.status = f"Waking the car (attempt {wake['attempt']})…"
                         except Exception as e:
                             st.status = f"Car unreachable: {api_error(e)[:50]}"
                     if data is None:
                         data = {"response": {"vin": st.target_vin}}
                     data["response"]["state"] = "waking"
-
             st.last_data = data
+            now = time.time()
+            in_data = jget(data or {}, "response.drive_state.active_route_destination")
+            if (data and data["response"].get("state") == "online" and not in_data
+                    and (now < st.route_until and not st.route and now - st.route_at > 10
+                         or st.route and now - st.route_at > ROUTE_EVERY)):
+                fetch_route(client, st)
+            dirty.set()
+
+        def fetch_loop() -> None:
+            forced = True
             while True:
-                if st.show_help:
-                    render_help(term, c, st)
-                elif "charge_state" not in data["response"]:    # no data seen yet
-                    term.home(); term.clear_to_end()
-                    term.write((st.status or f"Vehicle {data['response']['state']}, left to sleep")
-                               + "  (w: wake it, W: keep it awake, q: quit)\n")
-                else:
-                    render_dashboard(term, c, st, data)
-                key = term.read_key_timeout(poll if st.status else st.refresh_interval)
-                if handle_key(term, c, st, client, key):
-                    forced = key is not None
-                    if forced and not st.show_help and "charge_state" in data["response"]:
-                        # Back from a command or view: show the last data at once,
-                        # then fetch.
-                        render_dashboard(term, c, st, data)
+                try:
+                    fetch(forced)
+                except Exception:
+                    pass
+                forced = fetch_now.wait(poll if st.status else st.refresh_interval)
+                fetch_now.clear()
+
+        # Commands are sent one after the other in the background too.
+        st.jobs = queue.Queue()
+        def run_jobs() -> None:
+            while True:
+                job = st.jobs.get()
+                try:
+                    job()
+                except Exception:
+                    pass
+                st.pending -= 1
+                fetch_now.set()                     # show what the command did
+                dirty.set()
+
+        threading.Thread(target=fetch_loop, daemon=True).start()
+        threading.Thread(target=run_jobs, daemon=True).start()
+
+        size = term.get_size()
+        while True:
+            dirty.clear()
+            data = st.last_data
+            if st.show_help:
+                render_help(term, c, st)
+            elif data is None or "charge_state" not in data["response"]:    # no data seen yet
+                term.home(); term.clear_to_end()
+                state = (data or {}).get("response", {}).get("state")
+                term.write((st.status or (f"Vehicle {state}, left to sleep" if state
+                                          else "Asking the car…"))
+                           + "  (w: wake it, W: keep it awake, q: quit)\n")
+            else:
+                render_dashboard(term, c, st, data)
+            # Wait for a key, new data, a message to clear or a resize.
+            while True:
+                key = term.read_key_timeout(0.25)
+                if (key is not None or dirty.is_set() or term.get_size() != size
+                        or (st.cmd_msg_at and not st.pending
+                            and time.time() - st.cmd_msg_at >= MSG_SECONDS)):
                     break
+            size = term.get_size()
+            if key is not None and handle_key(term, c, st, client, key):
+                fetch_now.set()
 
     except KeyboardInterrupt:
         return 0

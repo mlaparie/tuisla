@@ -19,7 +19,7 @@ STEPS = [
     ("Command log",         "z",     "Every command and its result is logged."),
     ("Chargers",            ":",     "Chargers in range, or in km (chargers 200); Enter sends one to the car."),
     ("Terminal map",        ":",     "mapscii chargers / country: the car and the Superchargers in range or in its country."),
-    ("  Globe view",        "o",     "mapscii world, then o: all Superchargers on a 3D globe."),
+    ("  Globe view",        ":",     "mapscii world: all Superchargers on a 3D globe; a/z zoom."),
     ("Sleep",               "W",     "The car may sleep when idle (default); W keeps it awake, w wakes it once."),
     ("Modes",               "m",     "ro -> mtm (MyTeslaMate API) -> vc (own key, via vehicle-command)."),
 ]

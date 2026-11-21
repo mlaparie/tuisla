@@ -49,9 +49,9 @@ SCRIPT = [
     (None, [(0, "q")], 1.0),
     (None, [(0.5, ":")] + typed("mapscii country", 0.1) + [(0.8, "Enter")], 7.0),
     (None, [(0, "q")], 1.0),
-    # The world as a globe, then zoomed in on Europe.
-    (14, [(0.8, ":")] + typed("mapscii world", 0.1) + [(0.8, "Enter"), (5.0, "o")]
-         + [(3.0, "a")] + [(0.6, "a")] * 6, 3.0),
+    # The world opens as a globe, then zooms in on Europe.
+    (14, [(0.8, ":")] + typed("mapscii world", 0.1) + [(0.8, "Enter")]
+         + [(7.0, "a")] + [(0.6, "a")] * 6, 3.0),
     (None, [(0, "q"), (2.5, "q")], 1.0),
     (15, [(0.8, "W"), (3.5, "W")], 3.0),
     (16, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
