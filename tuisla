@@ -1793,16 +1793,95 @@ def position_age(st: "State") -> str:
     return "position from " + at.strftime("%-d %b" + (" %Y" if at.year != _dt.date.today().year else ""))
 
 
-def open_url_quietly(url: str) -> bool:
-    """Open url in a graphical browser without writing to the terminal (the
-    webbrowser module may start a text browser inside the TUI instead)."""
-    graphical = sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
-    for opener in ("termux-open-url", "open" if sys.platform == "darwin" else "xdg-open"):
-        if shutil.which(opener) and (graphical or opener == "termux-open-url"):
-            subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                             stderr=subprocess.DEVNULL, start_new_session=True)
-            return True
-    return False
+# Browsers that open a link in a new window unless told --new-tab; the others
+# (Chromium and co, and anything xdg-open or macOS's open start) take a tab.
+_NEW_TAB_BROWSERS = ("firefox", "librewolf", "icecat", "waterfox", "floorp", "zen",
+                     "mullvad-browser", "seamonkey")
+
+
+def browser_command(url: str) -> Tuple[Optional[List[str]], str]:
+    """The default browser's command for url (Linux), from the Exec line of
+    its .desktop file, in a new tab; None to leave it to xdg-open, with why."""
+    try:
+        desktop = subprocess.run(["xdg-mime", "query", "default", "x-scheme-handler/https"],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, f"xdg-mime: {e}"
+    if not desktop:
+        return None, "xdg-mime knows no default browser (x-scheme-handler/https)"
+    dirs = [os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share")]
+    dirs += (os.environ.get("XDG_DATA_DIRS") or "/usr/local/share:/usr/share").split(":")
+    for d in dirs:
+        try:
+            with open(os.path.join(d, "applications", desktop), encoding="utf-8") as f:
+                exec_line = next((ln[5:].strip() for ln in f if ln.startswith("Exec=")), "")
+        except (OSError, ValueError):
+            continue
+        try:
+            argv = shlex.split(exec_line)
+        except ValueError:
+            return None, f"{desktop}: Exec={exec_line}"
+        new_tab = ["--new-tab"] if any(b in a.lower() for a in argv for b in _NEW_TAB_BROWSERS) else []
+        cmd, placed = [], False
+        for a in argv:
+            if re.fullmatch(r"%[uUfF]", a) and not placed:
+                cmd += new_tab + [url]
+                placed = True
+            elif not re.fullmatch(r"%[a-zA-Z]", a):
+                cmd.append(a)
+        return (cmd if placed else cmd + new_tab + [url]), f"{desktop}: Exec={exec_line}"
+    return None, f"{desktop} is in no applications folder of {':'.join(dirs)}"
+
+
+def no_browser() -> str:
+    """Why no browser opened: no display, or no xdg-utils."""
+    if not sys.platform.startswith("linux") or shutil.which("termux-open-url"):
+        return ""
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return " (no DISPLAY or WAYLAND_DISPLAY here)"
+    return "" if shutil.which("xdg-open") else " (install xdg-utils)"
+
+
+def open_url_quietly(url: str) -> str:
+    """Open url in a new tab of a graphical browser without writing to the
+    terminal (the webbrowser module may start a text browser inside the TUI
+    instead): $BROWSER, else the default browser (xdg-utils).  Returns the
+    command used, "" if none."""
+    def start(cmd: List[str]) -> str:
+        shown = " ".join(a if a != url else "<link>" for a in cmd)
+        try:
+            proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.PIPE, start_new_session=True)
+        except OSError as e:
+            log_cmd("browser", f"X {shown}: {e}")
+            return ""
+
+        def report() -> None:      # a browser that fails says so on stderr
+            err = proc.stderr.read().decode("utf-8", "replace").strip() if proc.stderr else ""
+            if proc.wait():
+                log_cmd("browser", f"X {shown} exited with {proc.returncode}: {err[-300:] or 'no message'}")
+        threading.Thread(target=report, daemon=True).start()
+        return shown
+
+    if shutil.which("termux-open-url"):
+        return start(["termux-open-url", url])
+    if sys.platform == "darwin":
+        return start(["open", url])
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return ""
+    for b in (os.environ.get("BROWSER") or "").split(":"):
+        argv = shlex.split(b)
+        if argv and shutil.which(argv[0]):
+            args = [a.replace("%s", url) for a in argv]
+            return start(args if "%s" in b else args + [url])
+    if shutil.which("xdg-mime"):
+        cmd, why = browser_command(url)
+        if cmd and shutil.which(cmd[0]):
+            return start(cmd)
+        log_cmd("browser", f"default browser not used ({why}); trying xdg-open")
+    if shutil.which("xdg-open"):
+        return start(["xdg-open", url])
+    return ""
 
 
 # mapscii with start coordinates and markers is still a pull request
@@ -1984,24 +2063,75 @@ def charger_points(sites: Dict[str, Any]) -> List[Tuple[str, float, float, str]]
     return out
 
 
+def charger_infos(sites: Dict[str, Any], st: "State") -> List[str]:
+    """For each site of charger_points, in the same order: its distance, and
+    its free stalls for a Supercharger ("7/12 stalls free")."""
+    out = []
+    for kind in ("superchargers", "destination_charging"):
+        for site in sites.get(kind) or []:
+            loc = site.get("location") or {}
+            if loc.get("lat") is None or loc.get("long") is None:
+                continue
+            d = float(site.get("distance_miles") or 0)
+            parts = [f"{d * 1.60934:.1f} km" if st.unit == "metric" else f"{d:.1f} mi"]
+            if site.get("site_closed"):
+                parts.append("closed")
+            elif site.get("total_stalls") is not None:
+                parts.append(f"{int(site.get('available_stalls') or 0)}/{site['total_stalls']} stalls free")
+            out.append(", ".join(parts))
+    return out
+
+
 def cache_file(name: str) -> str:
     d = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "tuisla")
     os.makedirs(d, exist_ok=True)
     return os.path.join(d, name)
 
 
-# The car and the chargers on an OpenStreetMap map (Leaflet), opened from a file.
+# The car and the chargers on an OpenStreetMap map (Leaflet: no WebGL, which LibreWolf
+# turns off), opened from a file.  The tiles come from OpenStreetMap France:
+# OpenStreetMap's own (and CARTO's) refuse pages opened from a file.
 _MAP_HTML = """<!doctype html><meta charset="utf-8"><title>tuisla map</title>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-<style>html,body,#m{height:100%;margin:0}</style><div id="m"></div><script>
-const pts = __POINTS__, m = L.map("m"), colors = {car: "#d00", superchargers: "#c60", destination_charging: "#06c"};
-L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-  {maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"}).addTo(m);
-for (const [kind, lat, lon, name] of pts)
-  L.circleMarker([lat, lon], {radius: kind == "car" ? 9 : 7, color: colors[kind], fillOpacity: .7})
-   .addTo(m).bindTooltip(name);
+<style>html,body,#m{height:100%;margin:0}
+.pt{border:2px solid #fff;box-shadow:0 0 2px #000;box-sizing:border-box}
+.car{border-radius:50%}
+.legend{background:#fff;padding:6px 8px;border-radius:4px;box-shadow:0 0 4px #0004;font:13px/1.6 sans-serif}
+.legend span{display:inline-block;width:12px;height:12px;margin-right:6px;vertical-align:-1px}</style>
+<div id="m"></div><script>
+const pts = __POINTS__, m = L.map("m");
+const kinds = {car: ["#111", 16, "The car"], superchargers: ["#e31937", 13, "Tesla Supercharger"],
+               destination_charging: ["#1e88e5", 13, "Other charger"]};
+L.tileLayer("https://{s}.tile.openstreetmap.fr/osmfr/{z}/{x}/{y}.png",
+  {maxZoom: 20, subdomains: "abc", attribution:
+   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, tiles <a href="https://www.openstreetmap.fr">OpenStreetMap France</a>'}).addTo(m);
+const box = (kind, el) => {
+  const [color, size] = kinds[kind];
+  el.className = "pt" + (kind == "car" ? " car" : "");
+  Object.assign(el.style, {background: color, width: size + "px", height: size + "px"});
+  return el;
+};
+for (const [kind, lat, lon, name, info] of pts) {
+  const size = kinds[kind][1], tip = document.createElement("div"), b = document.createElement("b");
+  b.textContent = name; tip.append(b);
+  if (info) { tip.append(document.createElement("br"), info); }
+  L.marker([lat, lon], {icon: L.divIcon({html: box(kind, document.createElement("div")),
+                                         className: "", iconSize: [size, size]})})
+   .addTo(m).bindTooltip(tip);
+}
+const legend = L.control({position: "bottomleft"});
+legend.onAdd = () => {
+  const div = L.DomUtil.create("div", "legend");
+  for (const kind of Object.keys(kinds).filter(k => pts.some(p => p[0] == k))) {
+    const row = document.createElement("div");
+    row.append(box(kind, document.createElement("span")), kinds[kind][2]);
+    div.append(row);
+  }
+  return div;
+};
+legend.addTo(m);
 m.fitBounds(pts.map(p => [p[1], p[2]]), {padding: [30, 30], maxZoom: 15});
 </script>"""
 
@@ -2109,8 +2239,9 @@ def _run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         if lat is None:
             return fail("car location unknown")
         url = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}"
-        log_cmd("map", url)
-        how = "" if open_url_quietly(url) else " -- link in the log (z)"
+        opener = open_url_quietly(url)
+        log_cmd("map", f"{opener or 'no browser'}: {url}")
+        how = "" if opener else f" -- link in the log (z){no_browser()}"
         return f"h help    {c.GRN}✓ Map: {lat:.5f}, {lon:.5f}{how}{c.R}"
 
     if ep in ("_mapscii_world", "_mapscii_country"):
@@ -2166,10 +2297,14 @@ def _run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         return fail("no locations to show")
     if ep == "_mapscii_chargers":
         return run_mapscii(term, c, points, None)
-    path = cache_file("map.html")
-    with open(path, "w", encoding="utf-8") as f:
-        f.write(_MAP_HTML.replace("__POINTS__", json.dumps(points)))
-    how = "" if open_url_quietly("file://" + path) else f" -- open {path}"
+    fd, path = tempfile.mkstemp(prefix="tuisla-map-", suffix=".html")   # private, in /tmp
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(_MAP_HTML.replace("__POINTS__", json.dumps(
+            [[*p, info] for p, info in zip(points, ([""] if lat is not None else [])
+                                           + charger_infos(sites, st))]).replace("</", "<\\/")))
+    opener = open_url_quietly("file://" + path)
+    log_cmd("map chargers", f"{opener or 'no browser'}: {path}")
+    how = "" if opener else f" -- open {path}{no_browser()}"
     return f"h help    {c.GRN}✓ Map: car and {len(points) - (lat is not None)} chargers{how}{c.R}"
 
 
@@ -2575,6 +2710,9 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "",
     return chosen
 
 
+LOG_ROWS = 8                      # most rows an entry takes in the log pager (z)
+
+
 def show_log_pager(term: Term, c: Colors) -> None:
     """Read tuisla.log and display it newest-first in the builtin pager."""
     try:
@@ -2594,13 +2732,18 @@ def show_log_pager(term: Term, c: Colors) -> None:
     if not entries:
         all_lines.append(f"  {c.GRY}(log is empty){c.R}")
     else:
+        width = max(20, term.get_size()[0] - 4)   # wrapped here: a row the terminal wraps throws the pager off
         for entry in entries:
             if " - ok" in entry or "✓" in entry:
-                all_lines.append(f"  {c.GRN}{entry}{c.R}")
+                color = c.GRN
             elif any(x in entry for x in (" - X ", "Unknown", "missing", "disabled", "failed")):
-                all_lines.append(f"  {c.RED}{entry}{c.R}")
+                color = c.RED
             else:
-                all_lines.append(f"  {c.GRY}{entry}{c.R}")
+                color = c.GRY
+            rows = [entry[i:i + width] for i in range(0, len(entry), width)]
+            if len(rows) > LOG_ROWS:
+                rows = rows[:LOG_ROWS - 1] + [rows[LOG_ROWS - 1][:width - 1] + "…"]
+            all_lines += [f"  {color}{r}{c.R}" for r in rows]
 
     all_lines.append("")
     _pager_builtin(term, c, all_lines, title=f"Command log  {len(entries)} entries")

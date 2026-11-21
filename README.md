@@ -15,7 +15,7 @@ on the right only (demo data, read-only mode).*
 ## What you need
 
 - Python 3 and `curl`.
-- On Linux, `xdg-mime` (package `xdg-utils` on most distros), so that `--login` can catch the Tesla sign-in link by itself. Without it, you have to copy that link from the browser by hand.
+- On Linux, `xdg-utils`, so that `--login` can catch the Tesla sign-in link by itself and `map` opens your browser. Without it, you have to copy the sign-in link from the browser by hand, and open maps yourself.
 - Optionally, a font with the icons of the fancy style (⌁ ❄ ◎ ⊡ ⌖), such as Iosevka; DejaVu Sans Mono lacks ⌖, which most terminals then take from another font.
 - A Tesla account. Reading the car's information works out of the box and needs no extra API, except the current route (destination, arrival time and energy), which only Tesla's newer API gives: through MyTeslaMate or vc mode.
 - To send commands to the car, one of:
@@ -135,4 +135,4 @@ route                        Show the destination, arrival time and energy
 
 ## Credits
 
-The `mapscii` commands run [`mapscii`](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which rewrites it in TypeScript and adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. `mapscii country` and `mapscii world` show the Superchargers listed by [supercharge.info](https://supercharge.info).
+The `mapscii` commands run [`mapscii`](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which rewrites it in TypeScript and adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. `mapscii country` and `mapscii world` show the Superchargers listed by [supercharge.info](https://supercharge.info). `map chargers` draws its map with [Leaflet](https://leafletjs.com) and [OpenStreetMap France](https://www.openstreetmap.fr)'s tiles.
