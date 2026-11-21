@@ -129,10 +129,26 @@ chargers                     Chargers within the car's range, or km (chargers 50
 route                        Show the destination, arrival time and energy
 ```
 
+## Chargers on a map
+
+Besides Tesla's commands, a few custom ones are added to list nearby Superchargers and set navigation to them (`chargers <range>`), or to show the car or chargers on a map, either in a web browser (`map chargers`) or directly in the terminal (`mapscii chargers`, `mapscii country Spain`). This includes Tesla Superchargers and other chargers. The data come from Tesla for the chargers around your car, and from [supercharge.info](https://supercharge.info) and [OpenStreetMap](https://www.openstreetmap.org) for `mapscii country`, `mapscii world` and the demo mode, which `tuisla` queries once a week.
+
+![map chargers: the car and nearby chargers on a map in the browser](demo/map-chargers.png)
+
+![mapscii chargers: the car and nearby chargers on a map in the terminal](demo/mapscii-chargers.png)
+
 ## Sleep
 
 `tuisla` lets the car sleep when it is idle and wakes it only for commands: `w` wakes it, `W` (or `-W`) keeps it awake. While it sleeps or is out of reach, the dashboard shows the last data seen.
 
+## Disclaimer
+
+This project used AI assistance. I am not particularly proud of it, but none of this would have been possible if I were coding it alone. Everything was however directed and tested by a human, with some organic code writing and review as well, and was originally started in Bash before the Python rewrite. Expect rough edges still. PRs are welcome.
+
 ## Credits
 
-The `mapscii` commands run [`mapscii`](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which rewrites it in TypeScript and adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. `mapscii country` and `mapscii world` show the Superchargers listed by [supercharge.info](https://supercharge.info). `map chargers` draws its map with [Leaflet](https://leafletjs.com) and [OpenStreetMap France](https://www.openstreetmap.fr)'s tiles.
+The `mapscii` commands run [`mapscii`](https://mapscii.me) ([rastapasta/mapscii](https://github.com/rastapasta/mapscii)) by Michael Straßburger, in the version from [pull request 161](https://github.com/rastapasta/mapscii/pull/161) by [Fefedu973](https://github.com/Fefedu973), which rewrites it in TypeScript and adds start coordinates, markers and the 3D globe. Map data © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors. `mapscii country`, `mapscii world` and the demo mode show the Superchargers listed by [supercharge.info](https://supercharge.info); the demo mode's other chargers come from OpenStreetMap, through the [Overpass API](https://overpass-api.de). `map chargers` draws its map with [Leaflet](https://leafletjs.com) and [OpenStreetMap France](https://www.openstreetmap.fr)'s tiles.
+
+## License
+
+`tuisla` is free software under the [GNU Affero General Public License](LICENSE), version 3 or any later version.

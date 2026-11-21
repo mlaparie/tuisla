@@ -31,7 +31,8 @@ remakes it when needed.
 | File                 | What it is                                                                                     |
 |----------------------+------------------------------------------------------------------------------------------------|
 | =mapscii-0032cabb/=  | mapscii (pull request 161), fetched and built for =mapscii=                                    |
-| =superchargers.json= | Every Supercharger, from supercharge.info, for =mapscii country= and =world=; refreshed weekly |
+| =superchargers.json= | Every Supercharger, from supercharge.info, for =mapscii country=, =world= and the demo; weekly  |
+| =demo_chargers.json= | Other chargers around the demo car, from OpenStreetMap; refreshed weekly                       |
 | =markers.geojson=    | The car and chargers last shown in mapscii                                                     |
 
 =map chargers= writes its page to =/tmp= (=tuisla-map-*.html=, readable only by

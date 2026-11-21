@@ -124,24 +124,9 @@ DEMO_DATA = {
             "defrost_mode": 0,
         },
         "drive_state": {"power": 2, "shift_state": None, "speed": None, "timestamp": 1771692668445,
-                        "latitude": 48.8674, "longitude": 2.3636},
+                        "latitude": 48.1123, "longitude": -1.6694},
     }
 }
-
-DEMO_CHARGERS = {     # real Superchargers near the demo car; free stalls made up
-    "superchargers": [
-        {"name": "Paris, France - Bercy", "distance_miles": 2.4, "available_stalls": 7, "total_stalls": 12,
-         "location": {"lat": 48.83684, "long": 2.38588}},
-        {"name": "Thiais, France", "distance_miles": 7.8, "available_stalls": 21, "total_stalls": 32,
-         "location": {"lat": 48.754819, "long": 2.373043}},
-        {"name": "Vélizy, France - Avenue de l'Europe", "distance_miles": 8.7, "available_stalls": 0,
-         "total_stalls": 30, "location": {"lat": 48.784006, "long": 2.220934}},
-        {"name": "Beauvais, France", "distance_miles": 39.1, "available_stalls": 9, "total_stalls": 16,
-         "location": {"lat": 49.410005, "long": 2.11371}},
-    ],
-    "destination_charging": [],
-}
-
 
 def demo_route(site: Dict[str, Any]) -> None:
     """Demo data: a route to the picked charger, so the dashboard shows it."""
@@ -1988,8 +1973,7 @@ def nearby_chargers(client: Optional[TeslaClient], st: "State") -> Dict[str, Any
     "destination_charging": [...]}."""
     radius = range_km(st) / 1.609344                 # the API counts in miles
     if client is None:
-        return {k: [x for x in v if float(x.get("distance_miles") or 0) <= radius]
-                for k, v in DEMO_CHARGERS.items()}
+        return demo_chargers(st, radius)
     path = f"/vehicles/{st.vid}/nearby_charging_sites"
     try:
         return client.api_get(f"{path}?radius={max(1, round(radius))}&count=100").get("response") or {}
@@ -2003,6 +1987,74 @@ def nearby_chargers(client: Optional[TeslaClient], st: "State") -> Dict[str, Any
 # mapscii world and country: cached, and refreshed in the background once a week.
 SUPERCHARGE_INFO = "https://supercharge.info/service/supercharge/allSites"
 WORLD_REFRESH    = 7 * 86400
+
+
+OVERPASS      = "https://overpass-api.de/api/interpreter"
+DEMO_SITES    = 50               # chargers of each kind around the demo car
+DEMO_OSM_KM   = 30               # how far the demo looks for other chargers
+
+
+def km_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    a = (math.sin(math.radians(lat2 - lat1) / 2) ** 2 + math.cos(math.radians(lat1))
+         * math.cos(math.radians(lat2)) * math.sin(math.radians(lon2 - lon1) / 2) ** 2)
+    return 12742 * math.asin(math.sqrt(a))
+
+
+def demo_chargers(st: "State", radius_mi: float) -> Dict[str, Any]:
+    """What nearby_charging_sites would say around the demo car, from open
+    data: Superchargers from supercharge.info, other fast chargers from
+    OpenStreetMap.  No free stalls: those are live, from Tesla only."""
+    ds = DEMO_DATA["response"]["drive_state"]
+    lat, lon = ds["latitude"], ds["longitude"]
+
+    def site(name: str, la: float, lo: float, **extra: Any) -> Dict[str, Any]:
+        return {"name": name, "distance_miles": round(km_between(lat, lon, la, lo) / 1.609344, 1),
+                "location": {"lat": la, "long": lo}, **extra}
+
+    sc = [site(x["name"], x["gps"]["latitude"], x["gps"]["longitude"], total_stalls=x.get("stallCount"))
+          for x in world_superchargers(st.notify)]
+    sc = sorted((x for x in sc if x["distance_miles"] <= radius_mi), key=lambda x: x["distance_miles"])
+    others: List[Dict[str, Any]] = []
+    km = min(DEMO_OSM_KM, radius_mi * 1.609344)
+    query = (f'[out:json][timeout:80];nwr["amenity"="charging_station"]["socket:type2_combo"]'
+             f'(around:{int(km * 1000)},{lat},{lon});out center tags;')
+    path, elements = cache_file("demo_chargers.json"), None
+    try:                                # the demo car stays put: asked once a week
+        with open(path, encoding="utf-8") as f:
+            cached = json.load(f)
+        if cached.get("query") == query and time.time() - os.path.getmtime(path) < WORLD_REFRESH:
+            elements = cached["elements"]
+    except (OSError, ValueError, KeyError):
+        pass
+    if elements is None:
+        st.notify("Looking for other chargers around the demo car in OpenStreetMap…")
+        try:
+            req = urllib.request.Request(OVERPASS, urllib.parse.urlencode({"data": query}).encode(),
+                                         headers={"User-Agent": "tuisla"})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                elements = json.load(r).get("elements") or []
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"query": query, "elements": elements}, f)
+        except (OSError, ValueError) as e:
+            st.notify(f"No other chargers: OpenStreetMap: {e}")
+            elements = []
+    for x in elements:
+        t, c = x.get("tags") or {}, x.get("center") or x
+        op = (t.get("network") or t.get("brand") or t.get("operator") or "").split(";")[0].strip()
+        name = t.get("name") or ""
+        if "tesla" in f"{op} {name}".lower() or c.get("lat") is None or not (op or name):
+            continue
+        if op and name.lower().startswith(op.lower()):
+            name = name[len(op):].strip(" -|:")
+        label = f"{op} - {name}" if op and name else (op or name)
+        others.append(site(label, c["lat"], c["lon"]))
+    others.sort(key=lambda x: x["distance_miles"])
+    kept: List[Dict[str, Any]] = []
+    for x in others:                    # spread out, like Tesla's list (OSM maps each charger)
+        if not any(km_between(x["location"]["lat"], x["location"]["long"],
+                              k["location"]["lat"], k["location"]["long"]) < 1.5 for k in kept):
+            kept.append(x)
+    return {"superchargers": sc[:DEMO_SITES], "destination_charging": kept[:DEMO_SITES]}
 
 
 def world_superchargers(notify: Optional[Callable[[str], None]]) -> List[Dict[str, Any]]:
@@ -2076,8 +2128,10 @@ def charger_infos(sites: Dict[str, Any], st: "State") -> List[str]:
             parts = [f"{d * 1.60934:.1f} km" if st.unit == "metric" else f"{d:.1f} mi"]
             if site.get("site_closed"):
                 parts.append("closed")
+            elif site.get("available_stalls") is not None:
+                parts.append(f"{int(site['available_stalls'])}/{site.get('total_stalls')} stalls free")
             elif site.get("total_stalls") is not None:
-                parts.append(f"{int(site.get('available_stalls') or 0)}/{site['total_stalls']} stalls free")
+                parts.append(f"{site['total_stalls']} stalls")
             out.append(", ".join(parts))
     return out
 
@@ -2118,7 +2172,8 @@ for (const [kind, lat, lon, name, info] of pts) {
   b.textContent = name; tip.append(b);
   if (info) { tip.append(document.createElement("br"), info); }
   L.marker([lat, lon], {icon: L.divIcon({html: box(kind, document.createElement("div")),
-                                         className: "", iconSize: [size, size]})})
+                                         className: "", iconSize: [size, size]}),
+                    zIndexOffset: kind == "car" ? 1000 : 0})
    .addTo(m).bindTooltip(tip);
 }
 const legend = L.control({position: "bottomleft"});
@@ -2132,7 +2187,7 @@ legend.onAdd = () => {
   return div;
 };
 legend.addTo(m);
-m.fitBounds(pts.map(p => [p[1], p[2]]), {padding: [30, 30], maxZoom: 15});
+m.fitBounds(pts.map(p => [p[1], p[2]]), {padding: [60, 60], maxZoom: 15});
 </script>"""
 
 
@@ -2170,7 +2225,7 @@ def run_mapscii(term: Term, c: Colors, points: List[Tuple[str, float, float, str
         json.dump({"type": "FeatureCollection", "features": [
             {"type": "Feature", "geometry": {"type": "Point", "coordinates": [plon, plat]},
              "properties": {"label": name, "glyph": _MARKERS[kind][0], "color": _MARKERS[kind][1]}}
-            for kind, plat, plon, name in points]}, f)
+            for kind, plat, plon, name in sorted(points, key=lambda p: p[0] == "car")]}, f)   # car on top
     term.disable_raw(); term.invert_screen(False); term.home(); term.clear_to_end(); term.cursor(True)
     try:
         subprocess.run(with_node(mapscii_command() + ["--lat", str(lat), "--lon", str(lon),
@@ -2768,7 +2823,9 @@ def show_chargers_pager(term: Term, c: Colors, st: "State",
         all_lines += ["", f"  {c.B}{c.MAG}{title}{c.R}"]
         for site in sites.get(key) or []:
             stalls = ""
-            if "total_stalls" in site:
+            if site.get("total_stalls") is not None and site.get("available_stalls") is None:
+                stalls = f"  {c.GRY}{site['total_stalls']} stalls{c.R}"     # demo data
+            elif "total_stalls" in site:
                 free   = int(site.get("available_stalls") or 0)
                 col    = c.GRN if free else c.RED
                 stalls = f"  {col}{free}/{site.get('total_stalls')} free{c.R}"
