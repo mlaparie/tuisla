@@ -1,0 +1,412 @@
+#!/usr/bin/env python3
+# =============================================================================
+#  tuisla-setup-vc -- step-by-step setup of tuisla's vc mode
+#
+#  USAGE:  python3 tuisla-setup-vc     (or: tuisla --setup-vc)
+#
+#  Keep this file next to tuisla: it uses tuisla's own token storage, login
+#  and API code.  What it sets up is described in tuisla, "vc mode".
+# =============================================================================
+
+from __future__ import annotations
+
+import getpass
+import importlib.machinery
+import importlib.util
+import json
+import os
+import secrets
+import shutil
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+import webbrowser
+from typing import Any, Dict, List, Optional
+
+# tuisla has no .py extension, so load it by path.
+_path   = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tuisla")
+_loader = importlib.machinery.SourceFileLoader("tuisla", _path)
+tuisla  = importlib.util.module_from_spec(importlib.util.spec_from_loader("tuisla", _loader))
+sys.modules["tuisla"] = tuisla
+_loader.exec_module(tuisla)
+
+from tuisla import (AUTHORIZE_URL, FLEET_REGIONS, FLEET_TOKEN_FILE, FLEET_TOKEN_URL,  # noqa: E402
+                    VC_CONFIG, TeslaClient, VcBackend, _b64url, api_error, auth_post,
+                    find_proxy, fleet_client, jget, load_token, load_vc_config,
+                    parse_callback, save_token, token_path, vc_file)
+
+FLEET_SCOPES     = "openid offline_access vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds"
+PUBKEY_PATH      = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
+CALLBACK_PAGE    = "tuisla-callback.html"
+PROXY_REPO       = "github.com/teslamotors/vehicle-command/cmd/tesla-http-proxy"
+
+_CALLBACK_HTML = """<!doctype html>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>tuisla sign-in</title>
+<body style="font:16px sans-serif;max-width:40em;margin:2em auto;padding:0 1em">
+<h1>Almost done</h1>
+<p>Copy this whole address and paste it into tuisla:</p>
+<textarea id="u" rows="6" style="width:100%" readonly></textarea>
+<p><button onclick="navigator.clipboard.writeText(location.href);this.textContent='Copied'">Copy</button></p>
+<script>document.getElementById('u').value = location.href</script>
+"""
+
+
+def setup_vc() -> int:
+    """Interactive, resumable walk-through of everything vc mode needs."""
+    cfg: Dict[str, Any] = load_vc_config()
+    secret = ""
+    total  = 8
+
+    def save() -> None:
+        save_token(json.dumps(cfg, indent=2), VC_CONFIG)
+
+    def step(n: int, title: str) -> None:
+        print(f"\n\x1b[1m── Step {n}/{total}: {title} ──\x1b[0m\n")
+
+    def ask(q: str, default: str = "") -> str:
+        while True:
+            ans = input(f"{q}{f' [{default}]' if default else ''}: ").strip() or default
+            if ans:
+                return ans
+
+    def yes(q: str, default: bool = True) -> bool:
+        ans = input(f"{q} [{'Y/n' if default else 'y/N'}] ").strip().lower()
+        return default if not ans else ans.startswith("y")
+
+    def pause(msg: str = "Press Enter when done") -> None:
+        input(f"{msg}… ")
+
+    def get_secret() -> str:
+        nonlocal secret
+        while not secret:
+            secret = getpass.getpass("Client Secret (hidden, from the same page): ").strip()
+        return secret
+
+    def run(cmd: List[str]) -> bool:
+        out = subprocess.run(cmd, capture_output=True, text=True)
+        if out.returncode != 0:
+            print(f"X {' '.join(cmd[:2])} failed: {out.stderr.strip()[:300]}")
+        return out.returncode == 0
+
+    print("This sets up vc mode: tuisla signs commands itself with Tesla's own\n"
+          "vehicle-command proxy, instead of going through MyTeslaMate.  You need:\n"
+          "  - a Tesla account with two-factor authentication turned on,\n"
+          "  - a free GitHub account (or any website of yours) to publish one file,\n"
+          "  - your phone with the Tesla app, near the car, for the last steps,\n"
+          "  - a payment card: Tesla bills the Fleet API, but gives $10 of use every\n"
+          "    month, which covers a personal car (about 1000 commands = $1).\n"
+          "It takes about 20 minutes.  You can stop at any time (Ctrl-C) and run\n"
+          "tuisla --setup-vc again later: finished steps are remembered.")
+    try:
+        # ── 1. Tools ───────────────────────────────────────────────────────
+        step(1, "tools")
+        if not shutil.which("openssl"):
+            print("X openssl is needed to make the keys. Install it, then run this again:\n"
+                  "    Debian/Ubuntu: sudo apt install openssl     Fedora: sudo dnf install openssl\n"
+                  "    Arch: sudo pacman -S openssl                Guix: guix install openssl\n"
+                  "    Termux: pkg install openssl-tool            macOS: already installed")
+            return 1
+        print("✓ openssl")
+        if find_proxy():
+            print(f"✓ tesla-http-proxy ({find_proxy()})")
+        elif shutil.which("go"):
+            print("tesla-http-proxy (Tesla's command signer) is not installed.")
+            if yes(f"Install it now with: go install {PROXY_REPO}@latest ?"):
+                print("Building (a minute or two)…")
+                if run(["go", "install", f"{PROXY_REPO}@latest"]) and find_proxy():
+                    print(f"✓ tesla-http-proxy ({find_proxy()})")
+        if not find_proxy():
+            print("! tesla-http-proxy is missing; it is only needed at the very end, so you\n"
+                  "  can carry on and install it meanwhile.  It is built with Go:\n"
+                  "    1. Install Go:  Debian/Ubuntu: sudo apt install golang   Fedora: sudo dnf install golang\n"
+                  "                    Arch: sudo pacman -S go   Guix: guix install go   macOS: brew install go\n"
+                  "                    Termux: pkg install golang\n"
+                  f"    2. Run:  go install {PROXY_REPO}@latest")
+
+        # ── 2. Keys ────────────────────────────────────────────────────────
+        step(2, "keys")
+        os.makedirs(token_path("vc"), mode=0o700, exist_ok=True)
+        priv, pub = vc_file("private.pem"), vc_file("public.pem")
+        if os.path.exists(priv):
+            print("✓ Command key already made (kept: the car may already know it)")
+        elif not run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", priv]):
+            return 1
+        os.chmod(priv, 0o600)
+        if not run(["openssl", "ec", "-in", priv, "-pubout", "-out", pub]):
+            return 1
+        if not os.path.exists(vc_file("tls-cert.pem")):
+            if not run(["openssl", "req", "-x509", "-nodes", "-newkey", "ec",
+                        "-pkeyopt", "ec_paramgen_curve:secp384r1", "-pkeyopt", "ec_param_enc:named_curve",
+                        "-subj", "/CN=localhost", "-days", "3650", "-sha256",
+                        "-keyout", vc_file("tls-key.pem"), "-out", vc_file("tls-cert.pem"),
+                        "-addext", "subjectAltName = DNS:localhost, IP:127.0.0.1",
+                        "-addext", "extendedKeyUsage = serverAuth",
+                        "-addext", "keyUsage = digitalSignature, keyCertSign, keyAgreement"]):
+                return 1
+            os.chmod(vc_file("tls-key.pem"), 0o600)
+        with open(pub) as f:
+            pub_pem = f.read().strip()
+        print(f"✓ Keys in {token_path('vc')}")
+
+        # ── 3. Website ─────────────────────────────────────────────────────
+        step(3, "publish the public key")
+        site = vc_file("site")
+        for rel, text in ((PUBKEY_PATH.lstrip("/"), pub_pem + "\n"), (".nojekyll", ""),
+                          (CALLBACK_PAGE, _CALLBACK_HTML)):
+            os.makedirs(os.path.dirname(os.path.join(site, rel)), exist_ok=True)
+            with open(os.path.join(site, rel), "w") as f:
+                f.write(text)
+        print("Tesla only talks to apps that publish their public key on a website, at\n"
+              f"    https://<your domain>{PUBKEY_PATH}\n"
+              "A free GitHub Pages site is the easiest way.  Everything to publish is ready in\n"
+              f"    {site}\n")
+        if cfg.get("domain") and not yes(f"Keep using {cfg['domain']}?"):
+            cfg.pop("domain")
+        if not cfg.get("domain"):
+            if yes("Do you want to use GitHub Pages? (say no if you have your own website)"):
+                user = ask("Your GitHub user name (sign up at https://github.com/signup first)")
+                print(f"""
+1. Open https://github.com/new and make a repository named exactly
+       {user}.github.io
+   Leave it Public and tick "Add a README file", then "Create repository".
+2. Click "Add file" > "Create new file".  As the file name, type exactly
+       {PUBKEY_PATH.lstrip('/')}
+   (the slashes make the folders) and paste this as the content:
+
+{pub_pem}
+
+   Click "Commit changes…" twice.
+3. "Add file" > "Create new file" again, name it  .nojekyll  and type  tuisla  as
+   the content (GitHub would otherwise skip folders starting with a dot).  Commit.
+4. Optional, for an easier sign-in later: add one more file named {CALLBACK_PAGE}
+   with the content of {os.path.join(site, CALLBACK_PAGE)}.
+5. Open Settings > Pages; under "Branch" choose "main" and "/ (root)", Save.
+   Publishing takes a minute or two.
+
+(Using git?  The folder above is the whole site: commit its contents, dotfiles
+included, to the repository and push.)
+""")
+                cfg["domain"] = f"{user}.github.io".lower()
+            else:
+                cfg["domain"] = ask("Your domain (e.g. example.com)").lower().removeprefix("https://").strip("/")
+                print(f"\nPublish the contents of {site} at the root of https://{cfg['domain']}/\n"
+                      "(the .well-known folder and the files in it; the key must be served as is).")
+            save()
+        domain = cfg["domain"]
+        url = f"https://{domain}{PUBKEY_PATH}"
+        while True:
+            pause(f"Press Enter to check {url}")
+            try:
+                req = urllib.request.Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "tuisla/1.0"})
+                with urllib.request.urlopen(req, timeout=15) as r:
+                    got = r.read().decode("utf-8", "replace").strip()
+                if got.split() == pub_pem.split():
+                    print("✓ The public key is online")
+                    break
+                print("X A file is there but it is not this key; check that you pasted all of it.")
+            except Exception as e:
+                print(f"X Not there yet ({e}); GitHub may need another minute.")
+            if not yes("Try again?"):
+                print("Run tuisla --setup-vc again once it is online.")
+                return 1
+
+        # ── 4. Developer app ───────────────────────────────────────────────
+        step(4, "Tesla developer app")
+        redirect = f"https://{domain}/{CALLBACK_PAGE}"
+        if cfg.get("client_id") and not yes(f"Keep using the app with Client ID {cfg['client_id'][:8]}…?"):
+            cfg.pop("client_id")
+        if not cfg.get("client_id"):
+            print(f"""1. Open https://developer.tesla.com and sign in with your Tesla account.
+2. Choose "Create Application" (or "Request app access") and fill in:
+     Name:            tuisla-{domain.split('.')[0]}   (any name nobody else took)
+     Description:     Personal terminal app to control my own car
+     Purpose:         Personal use
+     Business details: your own name is fine for personal use
+     OAuth grant type:      Authorization Code and Machine-to-Machine
+     Allowed origin:        https://{domain}
+     Allowed redirect URI:  {redirect}
+     Scopes:  Vehicle Information, Vehicle Location, Vehicle Commands,
+              Vehicle Charging Management
+3. Under billing, add a payment method (the $10 monthly credit is applied first).
+4. Once created, open the app's "Credentials & APIs" page.
+""")
+            try:
+                webbrowser.open("https://developer.tesla.com")
+            except Exception:
+                pass
+            cfg["client_id"] = ask("Client ID")
+            get_secret()
+            cfg.pop("registered", None)
+        tz = os.environ.get("TZ") or os.path.realpath("/etc/localtime")
+        guess = "eu" if any(z in tz for z in ("Europe/", "Africa/")) else "na"
+        if cfg.get("region") not in FLEET_REGIONS:
+            print("Where is the car?  na = North America and Asia-Pacific,"
+                  " eu = Europe, Middle East and Africa.\n(China needs a separate app on developer.tesla.cn; not supported here.)")
+            while cfg.get("region") not in FLEET_REGIONS:
+                cfg["region"] = ask("Region (na or eu)", guess).lower()
+        cfg["fleet_api"] = FLEET_REGIONS[cfg["region"]]
+        save()
+
+        # ── 5. Register the domain ─────────────────────────────────────────
+        step(5, "register your domain with Tesla")
+        base = cfg["fleet_api"]
+        if cfg.get("registered") == f"{domain} {base}":
+            print(f"✓ {domain} already registered")
+        else:
+            http = TeslaClient("")
+            try:
+                tok = auth_post(FLEET_TOKEN_URL, {
+                    "grant_type": "client_credentials", "client_id": cfg["client_id"],
+                    "client_secret": get_secret(), "audience": base,
+                    "scope": "openid vehicle_device_data vehicle_cmds vehicle_charging_cmds"})
+                http.api_post(f"{base}/api/1/partner_accounts", {"domain": domain},
+                              bearer=tok.get("access_token") or "")
+            except RuntimeError as e:
+                print(f"X Registration failed: {api_error(e)}\n"
+                      "  Check the Client ID/Secret, that the allowed origin is exactly"
+                      f" https://{domain},\n  and that the app has a payment method.")
+                secret = ""
+                return 1
+            cfg["registered"] = f"{domain} {base}"
+            save()
+            print(f"✓ {domain} registered")
+
+        # ── 6. Sign in ─────────────────────────────────────────────────────
+        step(6, "allow the app to use your car")
+        fleet_rt = load_token(FLEET_TOKEN_FILE)
+        if fleet_rt and not yes("You already signed in. Sign in again?", default=False):
+            client = fleet_client(cfg, fleet_rt)
+        else:
+            state = _b64url(secrets.token_bytes(16))
+            auth  = AUTHORIZE_URL + "?" + urllib.parse.urlencode({
+                "client_id": cfg["client_id"], "redirect_uri": redirect, "response_type": "code",
+                "scope": FLEET_SCOPES, "state": state, "prompt_missing_scopes": "true",
+            }, quote_via=urllib.parse.quote)
+            print("Sign in with your Tesla account and allow all the permissions asked.\n"
+                  f"If no browser opens, use this URL:\n\n   {auth}\n\n"
+                  "You end up on your site: on the tuisla page, or on a \"404\" page if you\n"
+                  "skipped it.  Either way, copy the whole address from the address bar.")
+            try:
+                webbrowser.open(auth)
+            except Exception:
+                pass
+            while True:
+                try:
+                    query = parse_callback(input("Address: "), state, redirect, AUTHORIZE_URL)
+                    break
+                except ValueError as e:
+                    print(f"X {e}")
+            try:
+                resp = auth_post(FLEET_TOKEN_URL, {
+                    "grant_type": "authorization_code", "client_id": cfg["client_id"],
+                    "client_secret": get_secret(), "code": query["code"][0],
+                    "audience": base, "redirect_uri": redirect})
+            except RuntimeError as e:
+                print(f"X Sign-in failed: {api_error(e)}")
+                return 1
+            if not resp.get("refresh_token"):
+                print("X Sign-in failed (no refresh token)")
+                return 1
+            save_token(resp["refresh_token"], FLEET_TOKEN_FILE)
+            client = fleet_client(cfg, resp["refresh_token"])
+            client.access_token = resp.get("access_token") or ""
+        if not client.access_token:
+            client.refresh_access_token()
+        try:
+            region = jget(client.api_get("/users/region"), "response.fleet_api_base_url", "")
+            if region and region.rstrip("/") != base:
+                print(f"! Your account is served by {region}; switching to it.")
+                cfg["fleet_api"] = region.rstrip("/")
+                cfg["region"] = next((k for k, v in FLEET_REGIONS.items() if v == cfg["fleet_api"]), "")
+                cfg.pop("registered", None)
+                save()
+                print("Run tuisla --setup-vc again to register the domain there.")
+                return 1
+        except RuntimeError:
+            pass
+        print("✓ Signed in")
+
+        # ── 7. Pair the key ────────────────────────────────────────────────
+        step(7, "add the key to the car")
+        cars = [it for it in (client.api_get("/vehicles").get("response") or [])
+                if isinstance(it, dict) and it.get("vin")]
+        if not cars:
+            print("X No car on this account.")
+            return 1
+        vins = [c["vin"] for c in cars]
+        if cfg.get("vin") not in vins:
+            cfg["vin"] = os.environ.get("TESLA_VIN") if os.environ.get("TESLA_VIN") in vins else vins[0]
+            if len(cars) > 1:
+                for i, car in enumerate(cars, 1):
+                    print(f"  {i}. {car.get('display_name') or '?'}  {car['vin']}")
+                pick = ask("Which car", "1")
+                cfg["vin"] = vins[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(vins) else vins[0]
+            save()
+        vin = cfg["vin"]
+
+        def paired() -> Optional[bool]:
+            try:
+                resp = client.api_post(f"{client.api_base}/vehicles/fleet_status", {"vins": [vin]})
+            except RuntimeError:
+                return None
+            got = jget(resp, "response.key_paired_vins", None)
+            return None if got is None else vin in got
+
+        if paired():
+            print(f"✓ The key is already on {vin}")
+        else:
+            link = f"https://tesla.com/_ak/{domain}?vin={vin}"
+            print(f"""Open this link ON YOUR PHONE (send it to yourself by mail or chat):
+
+    {link}
+
+The Tesla app opens and asks to add a key for "{domain}": approve it.  Be next
+to the car (it must be awake, and your phone is its key).  The car may then ask
+you to tap your key card on the console; do it.""")
+            print("\nWaiting for the car to report the key (Ctrl-C to skip)…")
+            try:
+                for _ in range(40):
+                    time.sleep(15)
+                    ok = paired()
+                    if ok:
+                        print(f"✓ Key added to {vin}")
+                        break
+                    if ok is None:
+                        print("! Tesla does not say; check Controls > Locks in the car for"
+                              f" {domain}.")
+                        break
+                else:
+                    print("! Still not paired; run tuisla --setup-vc again once it is.")
+            except KeyboardInterrupt:
+                print("\nSkipped.")
+
+        # ── 8. Test ────────────────────────────────────────────────────────
+        step(8, "test")
+        if not find_proxy():
+            print("! Install tesla-http-proxy (see step 1), then test with: tuisla -m vc")
+        elif yes("Flash the lights to test it?"):
+            vc = VcBackend(client)
+            try:
+                vc.start()
+                resp = vc.command(vin, "flash_lights", None)
+                ok = jget(resp, "response.result", False)
+                print("✓ It works!" if ok else f"X {jget(resp, 'response.reason', '') or resp}")
+            except RuntimeError as e:
+                print(f"X {api_error(e)}  (the car may be asleep: try again in tuisla)")
+            finally:
+                vc.stop()
+        print("\nAll set.  Start tuisla in vc mode with:  tuisla -m vc")
+        return 0
+    except (KeyboardInterrupt, EOFError):
+        print("\nStopped; run tuisla --setup-vc to carry on.")
+        return 1
+    except RuntimeError as e:
+        print(f"X {api_error(e)}")
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(setup_vc())

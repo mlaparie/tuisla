@@ -7,6 +7,7 @@
 #          python3 tuisla -l|--login            (both steps below)
 #          python3 tuisla --login-tesla [--print]
 #          python3 tuisla --login-mtm
+#          python3 tuisla --setup-vc
 #
 #  LOGIN:  --login-tesla signs in to Tesla in the browser and saves a refresh
 #          token to $XDG_STATE_HOME/tuisla/refresh_token (~/.local/state/...),
@@ -16,17 +17,19 @@
 #          vehicle, copy the MyTeslaMate API token, not the Fleet API one) and
 #          asks for that token (Enter skips); saved as .../myteslamate_token.
 #
-#  MODES:  Vehicle data is always read from the Tesla Owner API; the mode only
+#  MODES:  Vehicle data is read from the Tesla Owner API; the mode only
 #          decides where commands go.
 #    ro    Read-only: commands are checked but not sent (dry run).  A valid
 #          command shows "✓ ... (ro: not sent)"; malformed ones still fail.
 #          Demo mode (no Tesla token) dry-runs commands the same way.
 #    mtm   (default) Commands go to MyTeslaMate (api.myteslamate.com) using the
 #          MyTeslaMate token.  The Tesla token is not sent to them.
-#    vc    Commands go to a local tesla-http-proxy (teslamotors/vehicle-command)
-#          at VEHICLE_COMMAND_URL.  NOTE: the proxy expects a Fleet API token
-#          from a registered Tesla developer app and a key paired with the car;
-#          the Owner API token tuisla uses will most likely be rejected.
+#    vc    Commands are signed with your own key, paired with the car, by
+#          Tesla's tesla-http-proxy (teslamotors/vehicle-command), which tuisla
+#          starts by itself, and go to the Fleet API with a token from your own
+#          Tesla developer app.  --setup-vc walks through all of it.  Without
+#          an Owner API login, vehicle data is read from the Fleet API too
+#          (billed by Tesla, so refreshing every 60 s at most).
 #
 #  UNITS:  metric | us (temperatures typed in commands follow the unit)
 #
@@ -37,8 +40,10 @@
 #                           first vehicle on the account is used.
 #    MYTESLAMATE_TOKEN      Optional. Used instead of the saved MyTeslaMate
 #                           token if set; mtm needs one or the other.
-#    VEHICLE_COMMAND_URL    Default: https://localhost:4443
-#    VEHICLE_COMMAND_CERT   CA file for the proxy's TLS cert. Default: cert.pem
+#    VEHICLE_COMMAND_URL    Optional. A tesla-http-proxy you run yourself for vc
+#                           mode (e.g. https://localhost:4443) instead of the
+#                           one tuisla starts.
+#    VEHICLE_COMMAND_CERT   CA file for that proxy's TLS cert. Default: cert.pem
 #                           (relative to the current directory)
 # =============================================================================
 
@@ -46,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import codecs
 import dataclasses
 import datetime as _dt
 import getpass
@@ -56,6 +62,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import ssl
 import subprocess
 import sys
@@ -86,7 +93,7 @@ DEMO_DATA = {
             "locked": True,
             "sentry_mode": True,
             "valet_mode": False,
-            "df": 0, "pf": 0, "dr": 0, "pr": 0,
+            "df": 0, "pf": 0, "dr": 0, "pr": 0, "ft": 0, "rt": 0,
             "software_update": {"version": "2026.2.6", "status": "available"},
             "tpms_pressure_fl": 3.00,
             "tpms_pressure_fr": 3.05,
@@ -109,11 +116,23 @@ DEMO_DATA = {
             "inside_temp": 22.5,
             "outside_temp": 8.0,
             "driver_temp_setting": 21.0,
+            "passenger_temp_setting": 21.0,
             "is_climate_on": True,
             "defrost_mode": 0,
         },
-        "drive_state": {"power": 2, "shift_state": None, "speed": None, "timestamp": 1771692668445},
+        "drive_state": {"power": 2, "shift_state": None, "speed": None, "timestamp": 1771692668445,
+                        "latitude": 37.4925, "longitude": -121.9447},
     }
+}
+
+DEMO_CHARGERS = {
+    "superchargers": [
+        {"name": "Fremont, CA", "distance_miles": 1.2, "available_stalls": 9, "total_stalls": 20},
+        {"name": "Milpitas, CA", "distance_miles": 4.8, "available_stalls": 0, "total_stalls": 12},
+    ],
+    "destination_charging": [
+        {"name": "Demo Hotel", "distance_miles": 0.7},
+    ],
 }
 
 # =============================================================================
@@ -132,20 +151,31 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("sentry off",              "set_sentry_mode",                  {"on": False},                              "Disable Sentry Mode"),
     ("valet on <password>",     "set_valet_mode",                   {"on": True,  "password": "<password>"},            "Enable valet mode (e.g. valet on 1234)"),
     ("valet off",               "set_valet_mode",                   {"on": False, "password": ""},              "Disable valet mode"),
+    ("valet reset pin",         "reset_valet_pin",                  None,                                       "Clear the valet mode PIN"),
+    ("guest on",                "guest_mode",                       {"enable": True},                           "Enable Guest Mode"),
+    ("guest off",               "guest_mode",                       {"enable": False},                          "Disable Guest Mode"),
+    ("pin2drive on <password>", "set_pin_to_drive",                 {"on": True,  "password": "<password>"},    "Enable PIN to Drive with a 4-digit PIN"),
+    ("pin2drive off <password>","set_pin_to_drive",                 {"on": False, "password": "<password>"},    "Disable PIN to Drive"),
+    ("pin2drive reset",         "reset_pin_to_drive_pin",           None,                                       "Clear the PIN to Drive PIN"),
     ("honk",                    "honk_horn",                        None,                                       "Honk the horn"),
     ("flash",                   "flash_lights",                     None,                                       "Flash the lights"),
-    ("remote start",            "remote_start_drive",               None,                                       "Remote start the car"),
+    ("remote start",            "remote_start_drive",               None,                                       "Allow keyless driving for 2 minutes"),
     # ── Locking ─────────────────────────────────────────────────────────────
     ("lock",                    "door_lock",                        None,                                       "Lock the doors"),
     ("unlock",                  "door_unlock",                      None,                                       "Unlock the doors"),
     ("windows vent",            "window_control",                   {"command": "vent",  "lat": 0, "lon": 0},   "Vent all windows"),
     ("windows close",           "window_control",                   {"command": "close", "lat": 0, "lon": 0},   "Close all windows"),
-    ("trunk toggle",            "actuate_trunk",                    {"which_trunk": "rear"},                    "Toggle the rear trunk"),
+    ("trunk open",              "actuate_trunk",                    {"which_trunk": "rear"},                    "Open the rear trunk (toggles on older cars)"),
     ("frunk open",              "actuate_trunk",                    {"which_trunk": "front"},                   "Open the frunk"),
+    ("tonneau open",            "open_tonneau",                     None,                                       "Open the tonneau cover (Cybertruck)"),
+    ("tonneau close",           "close_tonneau",                    None,                                       "Close the tonneau cover (Cybertruck)"),
+    ("tonneau stop",            "stop_tonneau",                     None,                                       "Stop the tonneau cover (Cybertruck)"),
     # ── Charging ────────────────────────────────────────────────────────────
     ("charge start",            "charge_start",                     None,                                       "Start charging"),
     ("charge stop",             "charge_stop",                      None,                                       "Stop charging"),
     ("charge limit <percent>",  "set_charge_limit",                 {"percent": "<percent>"},                   "Set charge limit % (e.g. charge limit 80)"),
+    ("charge max",              "charge_max_range",                 None,                                       "Set the charge limit to max range"),
+    ("charge std",              "charge_standard",                  None,                                       "Set the charge limit to standard"),
     ("charge amps <charging_amps>", "set_charging_amps",            {"charging_amps": "<charging_amps>"},       "Set charging amps (e.g. charge amps 16)"),
     ("port open",               "charge_port_door_open",            None,                                       "Open the charge port"),
     ("port close",              "charge_port_door_close",           None,                                       "Close the charge port"),
@@ -157,26 +187,53 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("temp_passenger <temp>",   "set_temps",                        {"driver_temp": None, "passenger_temp": "<temp>"},     "Set passenger temp only (e.g. temp_passenger 19)"),
     ("defrost on",              "set_preconditioning_max",          {"on": True},                               "Enable max defrost/preconditioning"),
     ("defrost off",             "set_preconditioning_max",          {"on": False},                              "Disable max defrost/preconditioning"),
-    ("seat heat <seat> <level>","remote_seat_heater_request",       {"seat_position": "<seat>", "level": "<level>"}, "Seat heat: seat 0-4, level 0-3 (e.g. seat heat 0 2)"),
+    ("seat heat <seat> <level>","remote_seat_heater_request",       {"seat_position": "<seat>", "level": "<level>"}, "Seat heat level 0-3 (e.g. seat heat driver 2)"),
+    ("seat cool <seat> <level>","remote_seat_cooler_request",       {"seat_position": "<seat>", "seat_cooler_level": "<level>"}, "Front seat cooling level 0-3 (e.g. seat cool passenger 1)"),
+    ("seat auto on <seat>",     "remote_auto_seat_climate_request", {"auto_seat_position": "<seat>", "auto_climate_on": True},  "Automatic front seat climate on"),
+    ("seat auto off <seat>",    "remote_auto_seat_climate_request", {"auto_seat_position": "<seat>", "auto_climate_on": False}, "Automatic front seat climate off"),
     ("steering heat on",        "remote_steering_wheel_heater_request", {"on": True},                           "Steering wheel heater on"),
     ("steering heat off",       "remote_steering_wheel_heater_request", {"on": False},                          "Steering wheel heater off"),
+    ("keeper off",              "set_climate_keeper_mode",          {"climate_keeper_mode": 0},                 "Climate keeper off"),
+    ("keeper on",               "set_climate_keeper_mode",          {"climate_keeper_mode": 1},                 "Keep climate on"),
+    ("keeper dog",              "set_climate_keeper_mode",          {"climate_keeper_mode": 2},                 "Dog mode"),
+    ("keeper camp",             "set_climate_keeper_mode",          {"climate_keeper_mode": 3},                 "Camp mode"),
+    ("overheat on",             "set_cabin_overheat_protection",    {"on": True,  "fan_only": False},           "Cabin overheat protection on (with A/C)"),
+    ("overheat fan",            "set_cabin_overheat_protection",    {"on": True,  "fan_only": True},            "Cabin overheat protection, fan only"),
+    ("overheat off",            "set_cabin_overheat_protection",    {"on": False, "fan_only": False},           "Cabin overheat protection off"),
+    ("overheat temp <level>",   "set_cop_temp",                     {"cop_temp": "<level>"},                    "Overheat protection temp: low, medium or high"),
+    ("bioweapon on",            "set_bioweapon_mode",               {"on": True,  "manual_override": True},     "Bioweapon Defense Mode on"),
+    ("bioweapon off",           "set_bioweapon_mode",               {"on": False, "manual_override": True},     "Bioweapon Defense Mode off"),
     # ── Settings ────────────────────────────────────────────────────────────
     ("speed limit on <pin>",    "speed_limit_activate",             {"pin": "<pin>"},                            "Activate speed limit (e.g. speed limit on 1234)"),
     ("speed limit off <pin>",   "speed_limit_deactivate",           {"pin": "<pin>"},                            "Deactivate speed limit (e.g. speed limit off 1234)"),
-    ("speed limit set <limit_mph>", "speed_limit_set_limit",        {"limit_mph": "<limit_mph>"},               "Set speed limit mph 50-90"),
+    ("speed limit set <limit>", "speed_limit_set_limit",            {"limit_mph": "<limit>"},                    "Set the speed limit, in km/h (mph with -u us)"),
     ("speed limit clear <pin>", "speed_limit_clear_pin",            {"pin": "<pin>"},                            "Clear speed limit PIN"),
-    ("sunroof vent",            "sun_roof_control",                 {"state": "vent"},                          "Vent the sunroof"),
-    ("sunroof close",           "sun_roof_control",                 {"state": "close"},                         "Close the sunroof"),
+    ("name <vehicle_name>",     "set_vehicle_name",                 {"vehicle_name": "<vehicle_name>"},         "Rename the car (e.g. name Blue Thunder)"),
+    ("accessory power on",      "keep_accessory_power_mode",        {"enable": True},                           "Keep accessory power on after leaving"),
+    ("accessory power off",     "keep_accessory_power_mode",        {"enable": False},                          "Stop keeping accessory power on"),
+    ("low power on",            "set_low_power_mode",               {"enable": True},                           "Low power mode on (Cybertruck)"),
+    ("low power off",           "set_low_power_mode",               {"enable": False},                          "Low power mode off (Cybertruck)"),
+    ("sunroof vent",            "sun_roof_control",                 {"state": "vent"},                          "Vent the sunroof (older Model S)"),
+    ("sunroof close",           "sun_roof_control",                 {"state": "close"},                         "Close the sunroof (older Model S)"),
     # ── Media ────────────────────────────────────────────────────────────────
     ("media play",              "media_toggle_playback",            None,                                       "Toggle media playback"),
     ("media next",              "media_next_track",                 None,                                       "Next track"),
     ("media prev",              "media_prev_track",                 None,                                       "Previous track"),
+    ("media fav next",          "media_next_fav",                   None,                                       "Next favorite"),
+    ("media fav prev",          "media_prev_fav",                   None,                                       "Previous favorite"),
     ("media vol up",            "media_volume_up",                  None,                                       "Volume up"),
     ("media vol down",          "media_volume_down",                None,                                       "Volume down"),
+    ("volume <volume>",         "adjust_volume",                    {"volume": "<volume>"},                     "Set the volume 0-11 (needs someone in the car)"),
+    # ── Navigation ───────────────────────────────────────────────────────────
+    ("navigate <address>",      "navigation_request",               {"address": "<address>"},                   "Send a destination to the car (e.g. navigate 1 Main St, Springfield)"),
     # ── Miscellaneous ────────────────────────────────────────────────────────
     ("homelink",                "trigger_homelink",                 {"lat": 0, "lon": 0},                       "Trigger Homelink garage opener"),
     ("update start",            "schedule_software_update",         {"offset_sec": 0},                          "Start pending software update now"),
     ("update cancel",           "cancel_software_update",           None,                                       "Cancel a pending software update"),
+    ("wake",                    "wake_up",                          None,                                       "Wake the car up"),
+    # ── Info (read only; nothing is sent to the car) ─────────────────────────
+    ("map",                     "_map",                             None,                                       "Open the car's location on a map in the browser"),
+    ("chargers",                "_chargers",                        None,                                       "List nearby Superchargers and destination chargers"),
 ]
 
 # Build keyword->(endpoint, body_template, help, placeholder names) lookup.
@@ -188,6 +245,12 @@ for _name, _ep, _body, _help in CMD_REGISTRY:
 
 # Static key names used for tab-completion (no <placeholders>).
 CMD_KEYS: List[str] = list(_CMD_LOOKUP.keys())
+
+# Arguments that take the rest of the line, spaces included.
+_TEXT_ARGS = ("vehicle_name", "address")
+# Seat names for <seat>; seat heaters number the seats as below.
+_SEATS = {"driver": 0, "passenger": 1, "rl": 2, "rc": 4, "rr": 5}
+_COP_TEMPS = {"low": 1, "medium": 2, "high": 3}
 
 
 def die(msg: str) -> None:
@@ -250,20 +313,13 @@ class Colors:
     _base: Dict[str, str] = dataclasses.field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        self._base = {
-            "R": self.R, "B": self.B, "DIM": self.DIM, "REV": self.REV,
-            "RED": self.RED, "GRN": self.GRN, "YLW": self.YLW, "BLU": self.BLU,
-            "MAG": self.MAG, "CYN": self.CYN, "GRY": self.GRY,
-        }
+        self._base = {name: getattr(self, name) for name in
+                      ("R", "B", "DIM", "REV", "RED", "GRN", "YLW", "BLU", "MAG", "CYN", "GRY")}
         self.apply_bw()
 
     def apply_bw(self) -> None:
-        self.R   = self._base["R"];   self.B   = self._base["B"]
-        self.DIM = self._base["DIM"]; self.REV = self._base["REV"]
-        self.RED = self._base["RED"]; self.GRN = self._base["GRN"]
-        self.YLW = self._base["YLW"]; self.BLU = self._base["BLU"]
-        self.MAG = self._base["MAG"]; self.CYN = self._base["CYN"]
-        self.GRY = self._base["GRY"]
+        for name, code in self._base.items():
+            setattr(self, name, code)
         if self.inverted:
             # Darker shades that stay readable on the light inverted background.
             self.YLW = "\x1b[38;5;136m"; self.GRN = "\x1b[38;5;28m"
@@ -272,6 +328,22 @@ class Colors:
             self.RED = ""; self.GRN = ""; self.YLW = ""
             self.BLU = ""; self.MAG = ""; self.CYN = ""
             self.GRY = "\x1b[90m"
+
+
+_utf8 = codecs.getincrementaldecoder("utf-8")("replace")
+
+
+def read_char() -> str:
+    """One character from the keyboard.  Unlike sys.stdin.read(1), this keeps
+    no buffer of its own, so select() on stdin still sees keys typed or pasted
+    in one go."""
+    while True:
+        b = os.read(sys.stdin.fileno(), 1)
+        if not b:
+            return "\x1b"                   # stdin closed: act like Esc
+        ch = _utf8.decode(b)
+        if ch:
+            return ch
 
 
 # Inverted screen: dark text on a light background.  Drawn by tuisla itself
@@ -296,7 +368,6 @@ class Term:
 
     def get_size(self) -> Tuple[int, int]:
         try:
-            import shutil
             sz = shutil.get_terminal_size(fallback=(80, 24))
             return (sz.columns, sz.lines)
         except Exception:
@@ -380,7 +451,7 @@ class Term:
                     return None
                 if not r:
                     return None
-                return sys.stdin.read(1)
+                return read_char()
             finally:
                 signal.signal(signal.SIGWINCH, old_handler)
                 os.close(pipe_r)
@@ -389,10 +460,8 @@ class Term:
 
 @dataclasses.dataclass
 class Frame:
-    term_w: int
     content_w: int
     lbl_w: int = 9
-    val_w: int = 20
     cat_labels: bool = False
 
     lines: List[str] = dataclasses.field(default_factory=list)
@@ -483,6 +552,7 @@ def two_col_title(content_w: int, left: str, right: str, *, shift_left: int = 0)
 
 MTM_TOKEN_FILE = "myteslamate_token"
 MTM_API_URL    = "https://app.myteslamate.com/fleet"   # the "API" tab
+MTM_API        = "https://api.myteslamate.com/api/1"
 
 
 def token_path(name: str = "refresh_token") -> str:
@@ -624,6 +694,35 @@ class _CallbackCatcher:
             except Exception: pass
 
 
+def parse_callback(pasted: str, state: str, redirect: str, authorize_url: str) -> Dict[str, List[str]]:
+    """Parameters of a pasted OAuth callback URL (or of a bare code), with a
+    'code'.  Raises ValueError saying what is wrong with it."""
+    # Drop terminal escapes (e.g. bracketed-paste markers), whitespace and quotes,
+    # undo JSON escaping, then read parameters from the query and the fragment.
+    pasted = re.sub(r"\x1b\[[0-9;]*~?|\s", "", pasted).strip("'\",")
+    pasted = pasted.replace("\\/", "/").replace("\\u0026", "&")
+    if re.fullmatch(r"[A-Za-z0-9._~-]+", pasted):
+        print("! Got a bare code; skipping the state check", file=sys.stderr)
+        pasted = f"{redirect}?code={pasted}&state={state}"
+    parts  = urllib.parse.urlparse(pasted)
+    query  = urllib.parse.parse_qs(parts.query)
+    for k, v in urllib.parse.parse_qs(parts.fragment).items():
+        query.setdefault(k, v)
+    if not (query.get("code") or [""])[0]:
+        err = (query.get("error_description") or query.get("error") or [""])[0]
+        if err:
+            raise ValueError(f"Tesla returned an error: {err}")
+        if pasted.startswith(authorize_url):
+            raise ValueError("That is the sign-in URL -- paste the Location of the 302 redirect instead")
+        seen = ", ".join(sorted(query)) or "none"
+        raise ValueError(f"No 'code' parameter in that URL"
+                         f" (page: {parts.netloc}{parts.path or '/'}; parameters: {seen})\n"
+                         f"  Expected a URL starting with {redirect}?...code=...")
+    if (query.get("state") or [""])[0] != state:
+        raise ValueError("State mismatch -- paste the URL from this login attempt")
+    return query
+
+
 def login(print_token: bool = False, then_mtm: bool = True) -> int:
     # Prompts go to stderr so that with --print stdout carries only the token.
     def say(msg: str = "") -> None:
@@ -678,33 +777,12 @@ def login(print_token: bool = False, then_mtm: bool = True) -> int:
             say()
             return 1
 
-    # Drop terminal escapes (e.g. bracketed-paste markers), whitespace and quotes,
-    # undo JSON escaping, then read parameters from the query and the fragment.
-    pasted = re.sub(r"\x1b\[[0-9;]*~?|\s", "", pasted).strip("'\",")
-    pasted = pasted.replace("\\/", "/").replace("\\u0026", "&")
-    if re.fullmatch(r"[A-Za-z0-9._~-]+", pasted):
-        say("! Got a bare code; skipping the state check")
-        pasted = f"{LOGIN_REDIRECT}?code={pasted}&state={state}"
-    parts  = urllib.parse.urlparse(pasted)
-    query  = urllib.parse.parse_qs(parts.query)
-    for k, v in urllib.parse.parse_qs(parts.fragment).items():
-        query.setdefault(k, v)
-    code  = (query.get("code")  or [""])[0]
-    if not code:
-        err = (query.get("error_description") or query.get("error") or [""])[0]
-        if err:
-            say(f"X Tesla returned an error: {err}")
-        elif pasted.startswith(AUTHORIZE_URL):
-            say("X That is the sign-in URL -- paste the Location of the 302 redirect instead")
-        else:
-            seen = ", ".join(sorted(query)) or "none"
-            say(f"X No 'code' parameter in that URL"
-                f" (page: {parts.netloc}{parts.path or '/'}; parameters: {seen})")
-            say(f"  Expected a URL starting with {LOGIN_REDIRECT}?...code=...")
+    try:
+        query = parse_callback(pasted, state, LOGIN_REDIRECT, AUTHORIZE_URL)
+    except ValueError as e:
+        say(f"X {e}")
         return 1
-    if (query.get("state") or [""])[0] != state:
-        say("X State mismatch -- paste the URL from this login attempt")
-        return 1
+    code = query["code"][0]
 
     # Accounts in China are served by auth.tesla.cn; the redirect names the issuer.
     issuer    = (query.get("issuer") or [""])[0].rstrip("/")
@@ -828,11 +906,20 @@ def auth_post(url: str, form: Dict[str, str]) -> Dict[str, Any]:
 
 
 class TeslaClient:
+    """Owner API client by default; with the Fleet API arguments it talks to
+    the Fleet API with a token from the developer app made by --setup-vc."""
+
     def __init__(self, refresh_token: str,
-                 on_rotate: Optional[Callable[[str], None]] = None) -> None:
+                 on_rotate: Optional[Callable[[str], None]] = None, *,
+                 api_base: str = OWNER_API, client_id: str = OWNER_CLIENT_ID,
+                 token_url: str = AUTH_URL, scope: str = "openid email offline_access") -> None:
         self.refresh_token = refresh_token
         self.access_token  = ""
         self.on_rotate     = on_rotate     # called with each new refresh token
+        self.api_base      = api_base
+        self.client_id     = client_id
+        self.token_url     = token_url
+        self.scope         = scope
 
     def _http(self, req: urllib.request.Request,
               ctx: Optional[ssl.SSLContext] = None) -> Dict[str, Any]:
@@ -847,12 +934,11 @@ class TeslaClient:
             raise RuntimeError(str(e)) from e
 
     def refresh_access_token(self) -> None:
-        resp = auth_post(AUTH_URL, {
-            "grant_type":    "refresh_token",
-            "client_id":     OWNER_CLIENT_ID,
-            "refresh_token": self.refresh_token,
-            "scope":         "openid email offline_access",
-        })
+        form = {"grant_type": "refresh_token", "client_id": self.client_id,
+                "refresh_token": self.refresh_token}
+        if self.scope:
+            form["scope"] = self.scope
+        resp = auth_post(self.token_url, form)
         at   = resp.get("access_token") or ""
         if not at:
             raise RuntimeError("Token refresh failed (missing access_token)")
@@ -863,60 +949,48 @@ class TeslaClient:
             if self.on_rotate:
                 self.on_rotate(new_rt)
 
-    def api_get(self, path: str) -> Dict[str, Any]:
-        req = urllib.request.Request(
-            OWNER_API + path, method="GET",
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Content-Type":  "application/json",
-                "User-Agent":    "tuisla/1.0",
-            },
-        )
-        return self._http(req)
-
-    def api_post(self, url: str, body: Optional[Dict[str, Any]] = None,
-                 ctx: Optional[ssl.SSLContext] = None, auth: bool = True) -> Dict[str, Any]:
-        payload = json.dumps(body).encode("utf-8") if body else b""
-        headers = {
-            "Content-Type":  "application/json",
-            "User-Agent":    "tuisla/1.0",
-        }
-        if auth:
-            headers["Authorization"] = f"Bearer {self.access_token}"
-        req = urllib.request.Request(url, method="POST", data=payload, headers=headers)
+    def _request(self, method: str, url: str, body: Optional[Dict[str, Any]],
+                 ctx: Optional[ssl.SSLContext], bearer: Optional[str]) -> Dict[str, Any]:
+        headers = {"Content-Type": "application/json", "User-Agent": "tuisla/1.0"}
+        bearer  = self.access_token if bearer is None else bearer
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+        payload = json.dumps(body).encode("utf-8") if body else (b"" if method == "POST" else None)
+        req = urllib.request.Request(url, method=method, data=payload, headers=headers)
         return self._http(req, ctx=ctx)
 
+    def api_get(self, path: str) -> Dict[str, Any]:
+        return self._request("GET", self.api_base + path, None, None, None)
+
+    def api_post(self, url: str, body: Optional[Dict[str, Any]] = None,
+                 ctx: Optional[ssl.SSLContext] = None, bearer: Optional[str] = None) -> Dict[str, Any]:
+        """POST to a full URL; bearer overrides our access token ("" sends none)."""
+        return self._request("POST", url, body, ctx, bearer)
+
     def get_vehicle_id_and_vin(self, target_vin: str) -> Tuple[str, str]:
-        resp  = self.api_get("/products")
-        items = resp.get("response") or []
-        if not isinstance(items, list):
-            return ("", "")
-
-        def pick(it: Dict[str, Any]) -> Tuple[str, str]:
-            vid = str(it.get("id_s") or it.get("id") or "")
-            vin = str(it.get("vin") or "")
-            return (vid, vin)
-
-        if target_vin:
-            for it in items:
-                if isinstance(it, dict) and it.get("vin") == target_vin:
-                    return pick(it)
-            return ("", "")
-        for it in items:
-            if isinstance(it, dict) and it.get("vin"):
-                return pick(it)
+        items = self.api_get("/products").get("response") or []
+        cars  = [it for it in items if isinstance(it, dict) and it.get("vin")] if isinstance(items, list) else []
+        for it in cars:
+            if not target_vin or it["vin"] == target_vin:
+                return (str(it.get("id_s") or it.get("id") or ""), str(it["vin"]))
         return ("", "")
 
     def wake_up(self, vid: str) -> None:
         try:
-            self.api_post(f"{OWNER_API}/vehicles/{vid}/wake_up")
+            self.api_post(f"{self.api_base}/vehicles/{vid}/wake_up")
         except Exception:
             pass
 
     def get_vehicle_data(self, vid: str) -> Optional[Dict[str, Any]]:
-        resp = self.api_get(f"/vehicles/{vid}/vehicle_data")
+        # The car's location is only included when asked for.
+        resp = self.api_get(f"/vehicles/{vid}/vehicle_data?endpoints="
+                            + urllib.parse.quote(VEHICLE_DATA_ENDPOINTS))
         vin  = jget(resp, "response.vin", "")
         return resp if vin else None
+
+
+VEHICLE_DATA_ENDPOINTS = ("charge_state;climate_state;closures_state;drive_state;"
+                          "gui_settings;location_data;vehicle_config;vehicle_state")
 
 
 # =============================================================================
@@ -938,70 +1012,188 @@ def log_cmd(ep: str, result: str) -> None:
 
 
 # =============================================================================
+#  vc mode: commands signed with our own key by Tesla's tesla-http-proxy
+#  (teslamotors/vehicle-command), using a Fleet API token from the user's own
+#  developer app.  tuisla-setup-vc walks through all of it; the results live in
+#  $XDG_STATE_HOME/tuisla/:
+#    vc.json               client_id, domain, Fleet API base URL, VIN
+#    fleet_refresh_token   Fleet API refresh token (rotated like refresh_token)
+#    vc/private.pem        the key the car learns at pairing (never share it)
+#    vc/public.pem         the same key's public half, hosted on the domain
+#    vc/tls-*.pem          self-signed certificate for the local proxy
+# =============================================================================
+
+VC_CONFIG        = "vc.json"
+FLEET_TOKEN_FILE = "fleet_refresh_token"
+FLEET_TOKEN_URL  = "https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token"
+FLEET_REGIONS    = {"na": "https://fleet-api.prd.na.vn.cloud.tesla.com",
+                    "eu": "https://fleet-api.prd.eu.vn.cloud.tesla.com"}
+FLEET_MIN_REFRESH = 60     # s; Fleet API data costs money (500 requests/$1)
+
+
+def vc_file(name: str) -> str:
+    return token_path(os.path.join("vc", name))
+
+
+def load_vc_config() -> Dict[str, Any]:
+    text = load_token(VC_CONFIG)
+    try:
+        return json.loads(text) if text else {}
+    except ValueError:
+        die(f"{token_path(VC_CONFIG)} is not valid JSON; fix it or run: tuisla --setup-vc")
+        return {}
+
+
+def find_proxy() -> str:
+    gopath = os.environ.get("GOPATH") or os.path.expanduser("~/go")
+    for cand in (shutil.which("tesla-http-proxy"), os.path.join(gopath, "bin", "tesla-http-proxy")):
+        if cand and os.access(cand, os.X_OK):
+            return cand
+    return ""
+
+
+def fleet_client(cfg: Dict[str, Any], refresh_token: str) -> TeslaClient:
+    def keep(new_rt: str) -> None:
+        try:
+            save_token(new_rt, FLEET_TOKEN_FILE)
+        except OSError as e:
+            log_cmd("token", f"X could not save Fleet API refresh token: {e}")
+    return TeslaClient(refresh_token, on_rotate=keep, api_base=cfg["fleet_api"] + "/api/1",
+                       client_id=cfg["client_id"], token_url=FLEET_TOKEN_URL, scope="")
+
+
+class VcBackend:
+    """Sends vc-mode commands through tesla-http-proxy: one the user runs
+    (VEHICLE_COMMAND_URL), or else one tuisla starts with the --setup-vc keys
+    on a free local port and stops on exit."""
+
+    def __init__(self, client: TeslaClient, url: str = "", cafile: str = "") -> None:
+        self.client   = client
+        self.external = bool(url)
+        self.url      = url.rstrip("/")
+        self.cafile   = cafile
+        self.proc: Optional[subprocess.Popen] = None
+
+    def context(self) -> ssl.SSLContext:
+        ctx = ssl.create_default_context(cafile=self.cafile if os.path.exists(self.cafile) else None)
+        # The proxy's self-signed certificate is its own CA; Python 3.13+ would
+        # reject that under its strict checks.
+        ctx.verify_flags &= ~getattr(ssl, "VERIFY_X509_STRICT", 0)
+        return ctx
+
+    def start(self) -> None:
+        if self.external or (self.proc and self.proc.poll() is None):
+            return
+        binary = find_proxy()
+        if not binary:
+            raise RuntimeError("tesla-http-proxy not found (run: tuisla --setup-vc)")
+        keys = [vc_file(n) for n in ("private.pem", "tls-key.pem", "tls-cert.pem")]
+        for k in keys:
+            if not os.path.exists(k):
+                raise RuntimeError(f"{k} missing (run: tuisla --setup-vc)")
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        with open(vc_file("proxy.log"), "ab") as log:
+            self.proc = subprocess.Popen(
+                [binary, "-key-file", keys[0], "-tls-key", keys[1], "-cert", keys[2],
+                 "-host", "localhost", "-port", str(port)],
+                stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+        self.url, self.cafile = f"https://localhost:{port}", keys[2]
+        ctx = self.context()
+        for _ in range(50):
+            if self.proc.poll() is not None:
+                break
+            try:
+                urllib.request.urlopen(self.url + "/health", context=ctx, timeout=2).close()
+                return
+            except Exception:
+                time.sleep(0.2)
+        self.stop()
+        raise RuntimeError(f"tesla-http-proxy did not start; see {vc_file('proxy.log')}")
+
+    def stop(self) -> None:
+        if self.proc:
+            self.proc.terminate()
+            try:
+                self.proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+            self.proc = None
+
+    def command(self, vin: str, ep: str, body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        self.start()
+        url = f"{self.url}/api/1/vehicles/{vin}/command/{ep}"
+        if not self.client.access_token:
+            self.client.refresh_access_token()
+        try:
+            return self.client.api_post(url, body, ctx=self.context())
+        except RuntimeError as e:
+            if not str(e).startswith(("HTTP 401", "HTTP 403")):
+                raise
+            # The access token expired since it was last used; renew once.
+            self.client.refresh_access_token()
+            return self.client.api_post(url, body, ctx=self.context())
+
+
+# =============================================================================
 #  Command execution
 # =============================================================================
 
+def api_error(e: Exception) -> str:
+    """The readable part of an API error: "HTTP 400: {"error": ...}" -> the error."""
+    head, _, body = str(e).partition(": ")
+    try:
+        err = json.loads(body)
+        msg = err.get("error_description") or err.get("error") or ""
+        if isinstance(msg, str) and msg:
+            return f"{head}: {msg}" if head.startswith("HTTP") else msg
+    except (ValueError, AttributeError):
+        pass
+    return str(e)
+
+
 def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
             body: Optional[Dict[str, Any]], c: Colors) -> str:
+    def done(ok: bool, msg: str) -> str:
+        log_cmd(ep, msg)
+        return f"h help    {c.GRN if ok else c.RED}{msg}{c.R}"
+
     # Dry run in ro mode and in demo mode (no token): the command was parsed
     # and validated, but nothing is sent to the car.
     if st.mode == "ro" or client is None:
-        why    = "ro" if st.mode == "ro" else "demo"
-        msg    = f"✓ {label} ({why}: not sent)"
-        result = f"h help    {c.GRN}{msg}{c.R}"
-        log_cmd(ep, msg)
-        return result
+        return done(True, f"✓ {label} ({'ro' if st.mode == 'ro' else 'demo'}: not sent)")
+    if not st.target_vin:
+        return done(False, "X TESLA_VIN missing")
+    vin = urllib.parse.quote(st.target_vin)
 
     try:
         if st.mode == "mtm":
-            if not st.target_vin:
-                msg    = "X TESLA_VIN missing"
-                result = f"h help    {c.RED}{msg}{c.R}"
-                log_cmd(ep, msg)
-                return result
             if not st.myteslamate_token:
-                msg    = "X MyTeslaMate token missing (run: tuisla --login-mtm)"
-                result = f"h help    {c.RED}{msg}{c.R}"
-                log_cmd(ep, msg)
-                return result
-            url  = (
-                f"https://api.myteslamate.com/api/1/vehicles"
-                f"/{urllib.parse.quote(st.target_vin)}/command/{ep}"
-                f"?token={urllib.parse.quote(st.myteslamate_token)}"
-            )
-            # MyTeslaMate authenticates with its own token; don't send ours.
-            resp = client.api_post(url, body, auth=False)
-        elif st.mode == "vc":
-            if not st.target_vin:
-                msg    = "X TESLA_VIN required for vc"
-                result = f"h help    {c.RED}{msg}{c.R}"
-                log_cmd(ep, msg)
-                return result
-            cafile = st.vehicle_command_cert or "cert.pem"
-            ctx    = ssl.create_default_context(cafile=cafile)
-            base   = st.vehicle_command_url.rstrip("/")
-            url    = f"{base}/api/1/vehicles/{urllib.parse.quote(st.target_vin)}/command/{ep}"
+                return done(False, "X MyTeslaMate token missing (run: tuisla --login-mtm)")
+            # MyTeslaMate mirrors the Fleet API and authenticates with its own
+            # token; ours is never sent to them.
+            url = f"{MTM_API}/vehicles/{vin}" + ("/wake_up" if ep == "wake_up" else f"/command/{ep}")
             try:
-                resp = client.api_post(url, body, ctx=ctx)
+                resp = client.api_post(url, body, bearer=st.myteslamate_token)
             except RuntimeError as e:
-                if not str(e).startswith("HTTP 401"):
+                if not str(e).startswith(("HTTP 401", "HTTP 403")):
                     raise
-                # Access token expired since the last data fetch; renew once.
-                client.refresh_access_token()
-                resp = client.api_post(url, body, ctx=ctx)
+                # Some MyTeslaMate tokens are only accepted as a URL parameter.
+                resp = client.api_post(f"{url}?token={urllib.parse.quote(st.myteslamate_token)}",
+                                       body, bearer="")
+        else:
+            if st.vc is None:
+                return done(False, "X vc mode is not set up (run: tuisla --setup-vc)")
+            resp = st.vc.command(vin, ep, body)
     except Exception as e:
-        msg    = f"X {str(e)[:180]}"
-        result = f"h help    {c.RED}{msg}{c.R}"
-        log_cmd(ep, msg)
-        return result
+        return done(False, f"X {api_error(e)[:180]}")
 
-    ok     = bool(jget(resp, "response.result", False))
+    ok = bool(jget(resp, "response.result", False)
+              or (ep == "wake_up" and jget(resp, "response.state", "")))
     reason = str(jget(resp, "response.reason", "") or jget(resp, "response.string", "")
                  or jget(resp, "error", "") or "failed")
-    msg    = (f"✓ {label}") if ok else (f"X {reason}")
-    result = f"h help    {c.GRN if ok else c.RED}{msg}{c.R}"
-    log_cmd(ep, msg)
-    return result
+    return done(ok, f"✓ {label}" if ok else f"X {reason}")
 
 
 # =============================================================================
@@ -1025,7 +1217,6 @@ def prompt_command(term: Term, c: Colors, st: "State") -> Optional[str]:
 
     row = st.prompt_row
     col = st.prompt_col          # right after "h help" label
-    avail = term_w - col - 2     # chars available on the prompt line
 
     buf: List[str] = []
 
@@ -1055,7 +1246,7 @@ def prompt_command(term: Term, c: Colors, st: "State") -> Optional[str]:
         if not r:
             break
 
-        ch = sys.stdin.read(1)
+        ch = read_char()
 
         if ch == "\x1b":
             erase_prompt()
@@ -1179,10 +1370,13 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
     arg_tokens = tokens[best_len:]
     if len(arg_tokens) < len(best_args):
         return fail(f"missing argument <{best_args[len(arg_tokens)]}> for '{best_key}'")
+    if best_args and best_args[-1] in _TEXT_ARGS:     # free text: takes the rest of the line
+        n = len(best_args) - 1
+        arg_tokens = arg_tokens[:n] + [" ".join(arg_tokens[n:])]
 
     args: Dict[str, Any] = {}
     for name, raw_val in zip(best_args, arg_tokens):
-        if name in ("pin", "password"):      # keep leading zeros
+        if name in ("pin", "password") or name in _TEXT_ARGS:   # keep leading zeros
             args[name] = raw_val
             continue
         try:
@@ -1192,6 +1386,29 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
                 args[name] = float(raw_val)
             except ValueError:
                 args[name] = raw_val
+
+    if "seat" in args:
+        seat = _SEATS.get(str(args["seat"]).lower(), args["seat"])
+        if not isinstance(seat, int):
+            return fail(f"unknown seat '{args['seat']}' (driver, passenger, rl, rc, rr)")
+        if best_ep != "remote_seat_heater_request":
+            if seat not in (0, 1):
+                return fail("only the front seats (driver, passenger) have this")
+            seat += 1                        # these commands number the front seats 1 and 2
+        args["seat"] = seat
+    if best_ep == "remote_seat_cooler_request":
+        if args["level"] not in (0, 1, 2, 3):
+            return fail("seat cooling level must be 0-3")
+        args["level"] += 1                   # the car counts 1 (off) to 4 (high)
+    if best_ep == "set_cop_temp":
+        if str(args["level"]).lower() not in _COP_TEMPS:
+            return fail("level must be low, medium or high")
+        args["level"] = _COP_TEMPS[str(args["level"]).lower()]
+    if best_ep == "speed_limit_set_limit":
+        if not isinstance(args["limit"], (int, float)):
+            return fail(f"speed limit must be a number, got '{args['limit']}'")
+        if st.unit == "metric":
+            args["limit"] = round(args["limit"] / 1.609344, 1)
 
     body: Optional[Dict[str, Any]] = None
     if best_tpl is not None:
@@ -1213,8 +1430,65 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
             elif st.unit == "us" and best_tpl and best_tpl[k] is not None:
                 body[k] = round((body[k] - 32) * 5 / 9, 1)
 
+    if body is not None and "lat" in body:
+        # Homelink (and closing windows on cars without the signed protocol)
+        # must be sent from near the car, so send the car's own location.
+        lat, lon = car_location(st)
+        if lat is None and best_ep == "trigger_homelink":
+            return fail("car location unknown")
+        if lat is not None:
+            body["lat"], body["lon"] = lat, lon
+
+    if best_ep == "navigation_request" and body is not None:
+        body = {"type": "share_ext_content_raw", "locale": "en-US",
+                "timestamp_ms": str(int(time.time() * 1000)),
+                "value": {"android.intent.extra.TEXT": body["address"]}}
+
     label = best_key[0].upper() + best_key[1:]
+    if best_ep.startswith("_"):
+        return run_info_cmd(term, c, client, st, best_ep)
     return run_cmd(client, st, best_ep, label, body, c)
+
+
+def car_location(st: "State") -> Tuple[Optional[float], Optional[float]]:
+    lat = jget(st.last_data or {}, "response.drive_state.latitude", None)
+    lon = jget(st.last_data or {}, "response.drive_state.longitude", None)
+    return (lat, lon) if lat is not None and lon is not None else (None, None)
+
+
+def open_url_quietly(url: str) -> bool:
+    """Open url in a graphical browser without writing to the terminal (the
+    webbrowser module may start a text browser inside the TUI instead)."""
+    graphical = sys.platform == "darwin" or os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    for opener in ("termux-open-url", "open" if sys.platform == "darwin" else "xdg-open"):
+        if shutil.which(opener) and (graphical or opener == "termux-open-url"):
+            subprocess.Popen([opener, url], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, start_new_session=True)
+            return True
+    return False
+
+
+def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
+                 st: "State", ep: str) -> str:
+    """Commands that only show something; nothing is sent to the car."""
+    if ep == "_map":
+        lat, lon = car_location(st)
+        if lat is None:
+            return f"h help    {c.RED}X car location unknown{c.R}"
+        url = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}"
+        log_cmd("map", url)
+        how = "" if open_url_quietly(url) else " -- link in the log (z)"
+        return f"h help    {c.GRN}✓ Map: {lat:.5f}, {lon:.5f}{how}{c.R}"
+
+    if client is None:
+        sites: Dict[str, Any] = DEMO_CHARGERS
+    else:
+        try:
+            sites = client.api_get(f"/vehicles/{st.vid}/nearby_charging_sites").get("response") or {}
+        except Exception as e:
+            return f"h help    {c.RED}X {str(e)[:180]}{c.R}"
+    show_chargers_pager(term, c, st, sites)
+    return ""
 
 
 # =============================================================================
@@ -1227,14 +1501,14 @@ class State:
     unit: str = "metric"
     refresh_interval: int = 5
     show_help: bool = False
-    show_cmd_pager: bool = False
     cmd_msg: str = ""
     prompt_row: int = 0          # row of the last status line, set by flush_frame
     prompt_col: int = 0          # col of the prompt cursor, set by render_dashboard
     target_vin: str = ""
     myteslamate_token: str = ""
-    vehicle_command_url: str = "https://localhost:4443"
-    vehicle_command_cert: str = "cert.pem"
+    vid: str = ""                # vehicle id for data requests
+    vc: Optional[VcBackend] = None               # set when vc mode is set up
+    min_refresh: int = 1
     last_data: Optional[Dict[str, Any]] = None   # last vehicle_data shown, for set_temps
 
 
@@ -1248,7 +1522,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     col_w    = 2 + lbl_w + val_w
     content_w = min((col_w * 2 + 2), term_w)
 
-    frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
+    frame = Frame(content_w=content_w, lbl_w=lbl_w)
     frame.blank()
 
     def kcap(k: str, desc: str) -> str:
@@ -1261,7 +1535,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
     frame.row1(c, kcap("q", "quit"), "")
 
-    cmd_frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
+    cmd_frame = Frame(content_w=content_w, lbl_w=lbl_w)
     cmd_frame.section(c, "COMMANDS")
     cmd_frame.row2(c, kcap("H", "honk"),        "", kcap("f", "flash lights"), "")
     cmd_frame.row2(c, kcap("L", "unlock"),      "", kcap("o", "open port"),    "")
@@ -1300,13 +1574,18 @@ def render_help(term: Term, c: Colors, st: State) -> None:
 # =============================================================================
 
 _PAGER_CATS: List[Tuple[str, Tuple[str, ...]]] = [
-    ("Security",      ("set_sentry", "set_valet", "honk_horn", "flash_lights", "remote_start")),
-    ("Locking",       ("door_lock", "door_unlock", "window_control", "actuate_trunk")),
-    ("Charging",      ("charge_start", "charge_stop", "set_charge", "set_charging", "charge_port")),
-    ("Climate",       ("auto_conditioning", "set_temps", "set_preconditioning", "remote_seat", "remote_steering")),
-    ("Settings",      ("speed_limit", "sun_roof")),
-    ("Media",         ("media_",)),
-    ("Miscellaneous", ("trigger_homelink", "schedule_software", "cancel_software")),
+    ("Security",      ("set_sentry", "set_valet", "reset_valet", "guest_mode", "set_pin_to_drive",
+                       "reset_pin_to_drive", "honk_horn", "flash_lights", "remote_start")),
+    ("Locking",       ("door_lock", "door_unlock", "window_control", "actuate_trunk", "open_tonneau",
+                       "close_tonneau", "stop_tonneau")),
+    ("Charging",      ("charge_", "set_charge", "set_charging")),
+    ("Climate",       ("auto_conditioning", "set_temps", "set_preconditioning", "remote_", "set_climate_keeper",
+                       "set_cabin_overheat", "set_cop", "set_bioweapon")),
+    ("Settings",      ("speed_limit", "set_vehicle_name", "keep_accessory", "set_low_power", "sun_roof")),
+    ("Media",         ("media_", "adjust_volume")),
+    ("Navigation",    ("navigation_",)),
+    ("Miscellaneous", ("trigger_homelink", "schedule_software", "cancel_software", "wake_up")),
+    ("Info",          ("_",)),
 ]
 
 
@@ -1327,16 +1606,28 @@ _PAGER_ALIASES: Dict[str, Tuple[str, List[str]]] = {
     "valet on|off":             ("Enable/disable valet mode (valet on <pwd>)",    ["valet on",         "valet off"]),
     "lock|unlock":              ("Lock/unlock the doors",                         ["lock",             "unlock"]),
     "windows vent|close":       ("Vent/close all windows",                        ["windows vent",     "windows close"]),
-    "trunk toggle|frunk open":  ("Toggle trunk/open frunk",                       ["trunk toggle",     "frunk open"]),
+    "trunk|frunk open":         ("Open the rear trunk/the frunk",                 ["trunk open",       "frunk open"]),
+    "tonneau open|close|stop":  ("Open/close/stop the tonneau (Cybertruck)",      ["tonneau open",     "tonneau close", "tonneau stop"]),
     "charge start|stop":        ("Start/stop charging",                           ["charge start",     "charge stop"]),
     "port open|close":          ("Open/close the charge port",                    ["port open",        "port close"]),
     "climate on|off":           ("Turn climate on/off",                           ["climate on",       "climate off"]),
     "defrost on|off":           ("Enable/disable max defrost/preconditioning",    ["defrost on",       "defrost off"]),
     "steering heat on|off":     ("Steering wheel heater on/off",                  ["steering heat on", "steering heat off"]),
-    "sunroof vent|close":       ("Vent/close the sunroof",                        ["sunroof vent",     "sunroof close"]),
+    "guest on|off":             ("Enable/disable Guest Mode",                     ["guest on",         "guest off"]),
+    "pin2drive on|off <pin>":   ("Enable/disable PIN to Drive",                   ["pin2drive on",     "pin2drive off"]),
+    "charge max|std":           ("Charge limit to max range/standard",            ["charge max",       "charge std"]),
+    "seat auto on|off <seat>":  ("Automatic front seat climate on/off",           ["seat auto on",     "seat auto off"]),
+    "keeper off|on|dog|camp":   ("Climate keeper: off, keep, dog or camp mode",   ["keeper off",       "keeper on",    "keeper dog",  "keeper camp"]),
+    "overheat on|fan|off":      ("Cabin overheat protection on/fan only/off",     ["overheat on",      "overheat fan", "overheat off"]),
+    "bioweapon on|off":         ("Bioweapon Defense Mode on/off",                 ["bioweapon on",     "bioweapon off"]),
+    "accessory power on|off":   ("Keep accessory power on/off",                   ["accessory power on", "accessory power off"]),
+    "low power on|off":         ("Low power mode on/off (Cybertruck)",            ["low power on",     "low power off"]),
+    "media fav next|prev":      ("Next/previous favorite",                        ["media fav next",   "media fav prev"]),
+    "media vol up|down":        ("Volume up/down",                                ["media vol up",     "media vol down"]),
+    "sunroof vent|close":       ("Vent/close the sunroof (older Model S)",                        ["sunroof vent",     "sunroof close"]),
     "media play|next|prev":     ("Toggle playback / next / prev track",           ["media play",       "media next",  "media prev"]),
     "speed limit on|off <pin>": ("Activate/deactivate speed limit",               ["speed limit on",   "speed limit off"]),
-    "speed limit set|clear":    ("Set limit mph 50-90/clear PIN",                 ["speed limit set",  "speed limit clear"]),
+    "speed limit set|clear":    ("Set limit (km/h, mph with -u us)/clear PIN",     ["speed limit set",  "speed limit clear"]),
     "update start|cancel":      ("Start/cancel pending software update",          ["update start",     "update cancel"]),
 }
 
@@ -1430,7 +1721,7 @@ def _pager_search_prompt(term: Term, c: Colors,
             break
         if not r:
             break
-        ch = sys.stdin.read(1)
+        ch = read_char()
         if ch in ("\r", "\n"):
             break
         if ch == "\x1b":
@@ -1529,7 +1820,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
         if not r:
             continue
 
-        ch = sys.stdin.read(1)
+        ch = read_char()
         _, term_h = term.get_size()
         half = max(1, (term_h - 2) // 2)
 
@@ -1596,6 +1887,33 @@ def show_log_pager(term: Term, c: Colors) -> None:
     _pager_builtin(term, c, all_lines, title=f"Command log  {len(entries)} entries")
 
 
+def show_chargers_pager(term: Term, c: Colors, st: "State", sites: Dict[str, Any]) -> None:
+    """Nearby charging sites (from nearby_charging_sites) in the builtin pager."""
+    dist_u = "km" if st.unit == "metric" else "mi"
+
+    def dist(site: Dict[str, Any]) -> str:
+        d = float(site.get("distance_miles") or 0)
+        return f"{d * 1.60934 if st.unit == 'metric' else d:6.1f} {dist_u}"
+
+    all_lines: List[str] = [
+        f"  {c.B}{c.MAG}NEARBY CHARGERS{c.R}  {c.GRY}q/Esc close  j/k scroll{c.R}", ""]
+    for title, key in (("Superchargers", "superchargers"), ("Destination", "destination_charging")):
+        all_lines += ["", f"  {c.B}{c.MAG}{title}{c.R}"]
+        for site in sites.get(key) or []:
+            stalls = ""
+            if "total_stalls" in site:
+                free   = int(site.get("available_stalls") or 0)
+                col    = c.GRN if free else c.RED
+                stalls = f"  {col}{free}/{site.get('total_stalls')} free{c.R}"
+                if site.get("site_closed"):
+                    stalls = f"  {c.RED}closed{c.R}"
+            all_lines.append(f"  {c.GRY}{dist(site)}{c.R}  {c.CYN}{site.get('name', '?')}{c.R}{stalls}")
+        if not sites.get(key):
+            all_lines.append(f"  {c.GRY}(none){c.R}")
+    all_lines.append("")
+    _pager_builtin(term, c, all_lines, title="Nearby chargers")
+
+
 # =============================================================================
 #  Render: main dashboard
 # =============================================================================
@@ -1606,7 +1924,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     lbl_w, val_w = 9, 20
     col_w    = 2 + lbl_w + val_w
     content_w = min((col_w * 2 + 2), term_w)
-    frame = Frame(term_w=term_w, content_w=content_w, lbl_w=lbl_w, val_w=val_w)
+    frame = Frame(content_w=content_w, lbl_w=lbl_w)
 
     dist_u  = "km"  if st.unit == "metric" else "mi"
     temp_u  = "°C"  if st.unit == "metric" else "°F"
@@ -1649,7 +1967,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     locked     = bool(jget(data, "response.vehicle_state.locked", False))
     sentry     = bool(jget(data, "response.vehicle_state.sentry_mode", False))
     valet      = bool(jget(data, "response.vehicle_state.valet_mode", False))
-    doors_open = sum(1 for k in ("df", "pf", "dr", "pr")
+    doors_open = sum(1 for k in ("df", "pf", "dr", "pr", "ft", "rt")
                      if int(jget(data, f"response.vehicle_state.{k}", 0) or 0) > 0)
 
     if st.unit == "metric":
@@ -1776,8 +2094,21 @@ def bar_to_psi(bar: float) -> int:
 #  Key handling
 # =============================================================================
 
+HOTKEYS: Dict[str, Tuple[str, str]] = {
+    "H": ("honk_horn",               "NOOT NOOT!"),
+    "f": ("flash_lights",            "Lights flashed"),
+    "L": ("door_unlock",             "Unlocked"),
+    "l": ("door_lock",               "Locked"),
+    "C": ("auto_conditioning_start", "Climate on"),
+    "c": ("auto_conditioning_stop",  "Climate off"),
+    "p": ("charge_start",            "Charging started"),
+    "P": ("charge_stop",             "Charging stopped"),
+    "o": ("charge_port_door_open",   "Port opened"),
+}
+
+
 def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
-               vid: str, key: Optional[str]) -> bool:
+               key: Optional[str]) -> bool:
     """Returns True if the caller should fetch fresh vehicle data."""
     if key is None:
         return True                         # timeout -> refresh
@@ -1787,8 +2118,7 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
 
     # h = help (was ?)
     if key == "h":
-        st.show_help      = not st.show_help
-        st.show_cmd_pager = False
+        st.show_help = not st.show_help
         return False
 
     # ? = full command pager -- runs inline (blocks until user quits)
@@ -1825,8 +2155,7 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
         return False
 
     if key == "r":
-        st.show_help      = False
-        st.show_cmd_pager = False
+        st.show_help = False
         return True
 
     if key == "+":
@@ -1836,35 +2165,15 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
         return False
 
     if key == "-":
-        st.refresh_interval -= 5
-        if st.refresh_interval <= 1:
-            st.refresh_interval = 1
+        st.refresh_interval = max(st.min_refresh, st.refresh_interval - 5)
         return False
 
-    # Command hotkeys -- only when neither overlay is open
-    cmd_keys = {"H", "f", "L", "l", "C", "c", "p", "P", "o", ":"}
-    if (not st.show_help) and (not st.show_cmd_pager) and (key in cmd_keys):
-        if key == "H":
-            st.cmd_msg = run_cmd(client, st, "honk_horn",              "NOOT NOOT!",      None, c)
-        elif key == "f":
-            st.cmd_msg = run_cmd(client, st, "flash_lights",            "Lights flashed",  None, c)
-        elif key == "L":
-            st.cmd_msg = run_cmd(client, st, "door_unlock",             "Unlocked",        None, c)
-        elif key == "l":
-            st.cmd_msg = run_cmd(client, st, "door_lock",               "Locked",          None, c)
-        elif key == "C":
-            st.cmd_msg = run_cmd(client, st, "auto_conditioning_start", "Climate on",      None, c)
-        elif key == "c":
-            st.cmd_msg = run_cmd(client, st, "auto_conditioning_stop",  "Climate off",     None, c)
-        elif key == "p":
-            st.cmd_msg = run_cmd(client, st, "charge_start",            "Charging started",None, c)
-        elif key == "P":
-            st.cmd_msg = run_cmd(client, st, "charge_stop",             "Charging stopped",None, c)
-        elif key == "o":
-            st.cmd_msg = run_cmd(client, st, "charge_port_door_open",   "Port opened",     None, c)
-        elif key == ":":
+    # Command hotkeys -- only when the help overlay is closed
+    if not st.show_help and (key in HOTKEYS or key == ":"):
+        if key == ":":
             st.cmd_msg = parse_and_run_cmd(term, c, client, st)
-
+        else:
+            st.cmd_msg = run_cmd(client, st, *HOTKEYS[key], None, c)
         return True                         # force immediate refresh after any command
 
     return False
@@ -1893,12 +2202,20 @@ def main() -> int:
                     help="Save a MyTeslaMate API token (from their API tab), then exit")
     ap.add_argument("--print",         action="store_true",
                     help="With --login-tesla: print the Tesla token instead of saving it")
+    ap.add_argument("--setup-vc",      action="store_true",
+                    help="Step-by-step setup of vc mode (own key and Tesla developer app)")
     args = ap.parse_args()
 
     if args.login or args.login_tesla:
         return login(print_token=args.print, then_mtm=args.login and not args.print)
     if args.login_mtm:
         return login_mtm()
+    if args.setup_vc:
+        # The one-time setup lives in its own script, next to this one.
+        script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tuisla-setup-vc")
+        if not os.path.exists(script):
+            die(f"{script} is missing; get it from the tuisla repository, next to tuisla")
+        os.execv(sys.executable, [sys.executable, script])
 
     st = State(
         mode=args.mode,
@@ -1906,14 +2223,22 @@ def main() -> int:
         refresh_interval=max(1, args.refresh),
         target_vin=os.environ.get("TESLA_VIN", "") or "",
         myteslamate_token=os.environ.get("MYTESLAMATE_TOKEN", "") or load_token(MTM_TOKEN_FILE),
-        vehicle_command_url=os.environ.get("VEHICLE_COMMAND_URL", "https://localhost:4443") or "https://localhost:4443",
-        vehicle_command_cert=os.environ.get("VEHICLE_COMMAND_CERT", "cert.pem") or "cert.pem",
     )
 
     # TESLA_REFRESH_TOKEN wins if set; the saved token is the fallback.
     env_token   = os.environ.get("TESLA_REFRESH_TOKEN", "") or ""
     saved_token = load_token()
     refresh_token = env_token or saved_token
+
+    vc_cfg   = load_vc_config()
+    fleet_rt = load_token(FLEET_TOKEN_FILE)
+    if vc_cfg.get("client_id") and vc_cfg.get("fleet_api") and fleet_rt:
+        st.vc = VcBackend(fleet_client(vc_cfg, fleet_rt),
+                          os.environ.get("VEHICLE_COMMAND_URL", ""),
+                          os.environ.get("VEHICLE_COMMAND_CERT", "") or "cert.pem")
+        st.target_vin = st.target_vin or vc_cfg.get("vin", "")
+    elif st.mode == "vc":
+        die("vc mode is not set up yet; run: tuisla --setup-vc")
     c = Colors(fancy=(not args.simple), inverted=bool(args.invert), bw=not args.color)
 
     term   = Term()
@@ -1931,6 +2256,7 @@ def main() -> int:
             lambda: term.cursor(True),
             lambda: term.invert_screen(False),
             lambda: term.alt_screen(False),
+            lambda: st.vc and st.vc.stop(),
         ):
             try: fn()
             except Exception: pass
@@ -1938,17 +2264,13 @@ def main() -> int:
     err = ""
     try:
         # DEMO MODE
-        if not refresh_token:
+        if not refresh_token and st.vc is None:
             while True:
                 if st.show_help:
                     render_help(term, c, st)
-                elif st.show_cmd_pager:
-                    render_dashboard(term, c, st, {"response": DEMO_DATA["response"]})
-                    st.show_cmd_pager = False
                 else:
-                    render_dashboard(term, c, st, {"response": DEMO_DATA["response"]})
-                key = term.read_key_timeout(st.refresh_interval)
-                _   = handle_key(term, c, st, None, "", key)
+                    render_dashboard(term, c, st, DEMO_DATA)
+                handle_key(term, c, st, None, term.read_key_timeout(st.refresh_interval))
 
         # LIVE MODE
         def keep_token(new_rt: str) -> None:
@@ -1957,7 +2279,13 @@ def main() -> int:
             except OSError as e:
                 log_cmd("token", f"X could not save refresh token: {e}")
 
-        client = TeslaClient(refresh_token, on_rotate=keep_token)
+        if refresh_token:
+            client = TeslaClient(refresh_token, on_rotate=keep_token)
+        else:
+            # No Owner API login: read through the Fleet API, which is billed.
+            client = st.vc.client
+            st.min_refresh      = FLEET_MIN_REFRESH
+            st.refresh_interval = max(st.refresh_interval, FLEET_MIN_REFRESH)
         term.home(); term.clear_to_end()
         term.write("Authenticating…\n")
         try:
@@ -1971,6 +2299,7 @@ def main() -> int:
             client.refresh_access_token()
         term.write("Looking up vehicle…\n")
         vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
+        st.vid   = vid
 
         if not st.target_vin and vin:
             st.target_vin = vin
@@ -2011,13 +2340,15 @@ def main() -> int:
                     term.write(f"{c.YLW}Wake request failed: {e!s:.60}{c.R}\n")
                     # Don't give up — network may still be coming up; keep polling
 
-                # Poll for up to 60 s (20 × 3 s) before declaring this cycle failed
-                for i in range(20):
-                    time.sleep(3)
+                # Poll for up to 60 s before declaring this cycle failed
+                # (less often when each request is billed)
+                poll = 3 if refresh_token else 10
+                for i in range(60 // poll):
+                    time.sleep(poll)
                     term.home(); term.clear_to_end()
                     term.write(
                         f"{c.YLW}Waiting for vehicle"
-                        f" (cycle {_wake_attempt}, {(i+1)*3}s)…{c.R}\n"
+                        f" (cycle {_wake_attempt}, {(i+1)*poll}s)…{c.R}\n"
                     )
                     try:
                         data = client.get_vehicle_data(vid)
@@ -2042,15 +2373,9 @@ def main() -> int:
             while True:
                 if st.show_help:
                     render_help(term, c, st)
-                elif st.show_cmd_pager:
-                    render_dashboard(term, c, st, data)
-                    st.show_cmd_pager = False
                 else:
                     render_dashboard(term, c, st, data)
-
-                key       = term.read_key_timeout(st.refresh_interval)
-                fetch_now = handle_key(term, c, st, client, vid, key)
-                if fetch_now:
+                if handle_key(term, c, st, client, term.read_key_timeout(st.refresh_interval)):
                     break
 
     except KeyboardInterrupt:
@@ -2063,7 +2388,8 @@ def main() -> int:
     # Only startup errors get here; the main loop retries on its own.
     print(f"tuisla: {err}", file=sys.stderr)
     if err.startswith(("HTTP 400", "HTTP 401", "Token refresh failed")):
-        print("tuisla: the refresh token looks invalid -- run: tuisla --login-tesla", file=sys.stderr)
+        fix = "tuisla --login-tesla" if refresh_token else "tuisla --setup-vc (step 6)"
+        print(f"tuisla: the refresh token looks invalid -- run: {fix}", file=sys.stderr)
     elif err.startswith("HTTP 403"):
         print("tuisla: Tesla refused the Owner API access token. Check that `curl -V` lists\n"
               "        HTTP2 (tuisla renews tokens over TLS 1.3 + HTTP/2 with curl); if it\n"

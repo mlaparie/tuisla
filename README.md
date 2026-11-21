@@ -41,6 +41,12 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car.
 
 - `--mode mtm` (default, recommended), commands are sent to the car through the MyTeslaMate API.
 - `--mode ro` (read-only), commands are checked for validity, but not sent.
-- `--mode vc` (not implemented yet), this mode will allow sending commands through Tesla's own [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy instead of MyTeslaMate, for those with a Tesla developer account and a key paired with their car.
+- `--mode vc`, commands are signed by tuisla itself with your own key, through Tesla's [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy, and sent with your own Tesla developer app instead of MyTeslaMate. Run `./tuisla --setup-vc` once (it runs `tuisla-setup-vc`, which must sit next to `tuisla`): it walks you through every step (keys, publishing the public key on a free GitHub Pages site, the Tesla developer app, adding the key to the car from the Tesla app) and checks each one. You need [Go](https://go.dev/) to install the proxy, `openssl`, and a payment card on the Tesla developer site; Tesla's $10 monthly credit covers a personal car. Once set up, vc mode also works without `--login-tesla`, but vehicle data then comes from the billed Fleet API, so tuisla refreshes every 60 s at most.
 
 See `./tuisla --help` for more options.
+
+## Commands
+
+Press `?` for the full list. Besides the usual lock, climate and charging commands, there are seat heating and cooling (`seat heat driver 2`), climate keeper and dog mode (`keeper dog`), cabin overheat protection, Guest Mode, PIN to Drive, speed limit, renaming the car, sending a destination (`navigate 1 Main St, Springfield`), Homelink, waking the car, and two read-only ones: `map` (the car's location on OpenStreetMap) and `chargers` (nearby Superchargers with free stalls).
+
+Not possible: Sentry Mode and dashcam clips are only stored on the car's USB drive, and the live Sentry camera view only works in Tesla's own app; no API gives access to them.
