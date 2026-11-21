@@ -121,17 +121,22 @@ DEMO_DATA = {
             "defrost_mode": 0,
         },
         "drive_state": {"power": 2, "shift_state": None, "speed": None, "timestamp": 1771692668445,
-                        "latitude": 37.4925, "longitude": -121.9447},
+                        "latitude": 37.4925, "longitude": -121.9447,
+                        "active_route_destination": "Monterey, CA",
+                        "active_route_miles_to_arrival": 71.3, "active_route_minutes_to_arrival": 84,
+                        "active_route_energy_at_arrival": 41, "active_route_traffic_minutes_delay": 6},
     }
 }
 
 DEMO_CHARGERS = {
     "superchargers": [
-        {"name": "Fremont, CA", "distance_miles": 1.2, "available_stalls": 9, "total_stalls": 20},
-        {"name": "Milpitas, CA", "distance_miles": 4.8, "available_stalls": 0, "total_stalls": 12},
+        {"name": "Fremont, CA", "distance_miles": 1.2, "available_stalls": 9, "total_stalls": 20,
+         "location": {"lat": 37.5087, "long": -121.9615}},
+        {"name": "Milpitas, CA", "distance_miles": 4.8, "available_stalls": 0, "total_stalls": 12,
+         "location": {"lat": 37.4153, "long": -121.8970}},
     ],
     "destination_charging": [
-        {"name": "Demo Hotel", "distance_miles": 0.7},
+        {"name": "Demo Hotel", "distance_miles": 0.7, "location": {"lat": 37.4985, "long": -121.9370}},
     ],
 }
 
@@ -226,6 +231,7 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("volume <volume>",         "adjust_volume",                    {"volume": "<volume>"},                     "Set the volume 0-11 (needs someone in the car)"),
     # ── Navigation ───────────────────────────────────────────────────────────
     ("navigate <address>",      "navigation_request",               {"address": "<address>"},                   "Send a destination to the car (e.g. navigate 1 Main St, Springfield)"),
+    ("navigate gps <lat> <lon>","navigation_gps_request",           {"lat": "<lat>", "lon": "<lon>"},           "Send coordinates to the car (e.g. navigate gps 37.49 -121.94)"),
     # ── Miscellaneous ────────────────────────────────────────────────────────
     ("homelink",                "trigger_homelink",                 {"lat": 0, "lon": 0},                       "Trigger Homelink garage opener"),
     ("update start",            "schedule_software_update",         {"offset_sec": 0},                          "Start pending software update now"),
@@ -233,8 +239,11 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("wake",                    "wake_up",                          None,                                       "Wake the car up"),
     # ── Info (read only; nothing is sent to the car) ─────────────────────────
     ("map",                     "_map",                             None,                                       "Open the car's location on a map in the browser"),
+    ("map chargers",            "_map_chargers",                    None,                                       "Open the car and nearby chargers on a map in the browser"),
     ("maptui",                  "_maptui",                          None,                                       "Show the car on a map in the terminal (mapscii)"),
-    ("chargers",                "_chargers",                        None,                                       "List nearby Superchargers and destination chargers"),
+    ("maptui chargers",         "_maptui_chargers",                 None,                                       "Show the car and nearby chargers in the terminal (mapscii)"),
+    ("chargers",                "_chargers",                        None,                                       "List nearby chargers; Enter sends one to the car"),
+    ("route",                   "_route",                           None,                                       "Show the destination, arrival time and energy"),
 ]
 
 # Build keyword->(endpoint, body_template, help, placeholder names) lookup.
@@ -502,6 +511,7 @@ class Frame:
 
 
 MSG_SECONDS = 3                  # a command's result stays at least this long
+ROUTE_WATCH = 120                # s to keep asking for the route after sending one
 
 _MIN_TERM_W = 64
 _MIN_TERM_H = 21
@@ -1009,8 +1019,15 @@ class TeslaClient:
         except Exception:
             pass
 
-    def get_vehicle_data(self, vid: str) -> Optional[Dict[str, Any]]:
-        resp = self.api_get(f"/vehicles/{vid}/vehicle_data")
+    def get_state(self, vid: str) -> str:
+        """online, asleep or offline; asking neither wakes the car nor keeps it awake."""
+        return str(jget(self.api_get(f"/vehicles/{vid}"), "response.state", "") or "unknown")
+
+    def get_vehicle_data(self, vid: str, location: bool = False) -> Optional[Dict[str, Any]]:
+        # The location (and route) is slower to get, so it is only asked for when needed.
+        q = ("?endpoints=" + urllib.parse.quote("charge_state;climate_state;drive_state;gui_settings;"
+                                                "vehicle_config;vehicle_state;location_data")) if location else ""
+        resp = self.api_get(f"/vehicles/{vid}/vehicle_data{q}")
         vin  = jget(resp, "response.vin", "")
         return resp if vin else None
 
@@ -1176,6 +1193,26 @@ def api_error(e: Exception) -> str:
     return str(e)
 
 
+def wake_for_command(client: TeslaClient, st: "State") -> bool:
+    """Wake a sleeping car so that it gets the command; it falls asleep again
+    on its own afterwards.  Returns False if it stays asleep."""
+    if jget(st.last_data or {}, "response.state", "online") == "online":
+        return True
+    for i in range(20):
+        if i % 5 == 0:
+            client.wake_up(st.vid)
+        if st.notify:
+            st.notify(f"Waking the car for the command… {2 * i}s")
+        try:
+            if client.get_state(st.vid) == "online":
+                st.last_data["response"]["state"] = "online"
+                return True
+        except Exception:
+            pass
+        time.sleep(2)
+    return False
+
+
 def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
             body: Optional[Dict[str, Any]], c: Colors) -> str:
     def done(ok: bool, msg: str) -> str:
@@ -1189,6 +1226,8 @@ def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
     if not st.target_vin:
         return done(False, "X TESLA_VIN missing")
     vin = urllib.parse.quote(st.target_vin)
+    if ep != "wake_up" and not wake_for_command(client, st):
+        return done(False, "X the car did not wake up")
 
     try:
         if st.mode == "mtm":
@@ -1453,7 +1492,7 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
             elif st.unit == "us" and best_tpl and best_tpl[k] is not None:
                 body[k] = round((body[k] - 32) * 5 / 9, 1)
 
-    if body is not None and "lat" in body:
+    if body is not None and best_ep in ("trigger_homelink", "window_control"):
         # Homelink (and closing windows on cars without the signed protocol)
         # must be sent from near the car, so send the car's own location.
         lat, lon = car_location(client if best_ep == "trigger_homelink" else None, st)
@@ -1462,6 +1501,11 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         if lat is not None:
             body["lat"], body["lon"] = lat, lon
 
+    if best_ep == "navigation_gps_request" and not all(
+            isinstance(args[k], (int, float)) for k in ("lat", "lon")):
+        return fail("lat and lon must be numbers")
+    if best_ep.startswith("navigation_"):
+        st.route_until = time.time() + ROUTE_WATCH
     if best_ep == "navigation_request" and body is not None:
         body = {"type": "share_ext_content_raw", "locale": "en-US",
                 "timestamp_ms": str(int(time.time() * 1000)),
@@ -1473,10 +1517,27 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
     return run_cmd(client, st, best_ep, label, body, c)
 
 
-def car_location(client: Optional[TeslaClient], st: "State") -> Tuple[Optional[float], Optional[float]]:
+def car_busy(data: Dict[str, Any]) -> bool:
+    """Driving, charging, conditioning or someone inside: no sleep coming."""
+    r = data.get("response") or {}
+    return bool(jget(r, "drive_state.shift_state") in ("D", "R", "N")
+                or str(jget(r, "charge_state.charging_state", "")).lower() == "charging"
+                or jget(r, "climate_state.is_climate_on") or jget(r, "vehicle_state.is_user_present"))
+
+
+def wants_location(st: "State") -> bool:
+    """Ask for the location with the data while driving or following a route."""
+    ds = jget(st.last_data or {}, "response.drive_state", {}) or {}
+    return (time.time() < st.route_until or ds.get("shift_state") in ("D", "R", "N")
+            or bool(ds.get("active_route_destination")))
+
+
+def car_location(client: Optional[TeslaClient], st: "State",
+                 fresh: bool = False) -> Tuple[Optional[float], Optional[float]]:
     """The car's position from the last data, else asked for (with a client):
-    routine refreshes leave the location out, since it makes them slower."""
-    if client and st.last_data and jget(st.last_data, "response.drive_state.latitude") is None:
+    routine refreshes leave the location out, since it makes them slower.
+    The answer also brings the route (active_route_*)."""
+    if client and st.last_data and (fresh or jget(st.last_data, "response.drive_state.latitude") is None):
         try:
             got = client.api_get(f"/vehicles/{st.vid}/vehicle_data?endpoints="
                                  + urllib.parse.quote("drive_state;location_data"))
@@ -1554,16 +1615,53 @@ def mapscii_command() -> List[str]:
     return [node, bundle]
 
 
-def run_mapscii(term: Term, c: Colors, client: Optional[TeslaClient], st: "State") -> str:
-    """Show the car in mapscii, in place of the dashboard until it quits."""
-    lat, lon = car_location(client, st)
-    if lat is None:
-        return f"h help    {c.RED}X car location unknown{c.R}"
+def nearby_chargers(client: Optional[TeslaClient], st: "State") -> Dict[str, Any]:
+    """nearby_charging_sites, as {"superchargers": [...], "destination_charging": [...]}."""
+    if client is None:
+        return DEMO_CHARGERS
+    return client.api_get(f"/vehicles/{st.vid}/nearby_charging_sites").get("response") or {}
+
+
+def charger_points(sites: Dict[str, Any]) -> List[Tuple[str, float, float, str]]:
+    """(kind, lat, lon, name) of each site that has a location."""
+    out = []
+    for kind in ("superchargers", "destination_charging"):
+        for site in sites.get(kind) or []:
+            loc = site.get("location") or {}
+            if loc.get("lat") is not None and loc.get("long") is not None:
+                out.append((kind, float(loc["lat"]), float(loc["long"]), str(site.get("name", "?"))))
+    return out
+
+
+def cache_file(name: str) -> str:
+    d = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "tuisla")
+    os.makedirs(d, exist_ok=True)
+    return os.path.join(d, name)
+
+
+# The car and the chargers on an OpenStreetMap map (Leaflet), opened from a file.
+_MAP_HTML = """<!doctype html><meta charset="utf-8"><title>tuisla map</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>html,body,#m{height:100%;margin:0}</style><div id="m"></div><script>
+const pts = __POINTS__, m = L.map("m"), colors = {car: "#d00", superchargers: "#c60", destination_charging: "#06c"};
+L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  {maxZoom: 19, attribution: "&copy; OpenStreetMap contributors"}).addTo(m);
+for (const [kind, lat, lon, name] of pts)
+  L.circleMarker([lat, lon], {radius: kind == "car" ? 9 : 7, color: colors[kind], fillOpacity: .7})
+   .addTo(m).bindTooltip(name);
+m.fitBounds(pts.map(p => [p[1], p[2]]), {padding: [30, 30], maxZoom: 15});
+</script>"""
+
+
+def run_mapscii(term: Term, c: Colors, lat: float, lon: float, zoom: int,
+                geojson: str = "") -> str:
+    """Show the map in mapscii, in place of the dashboard until it quits."""
     term.disable_raw(); term.invert_screen(False); term.alt_screen(False); term.cursor(True)
     try:
-        cmd = mapscii_command()
-        subprocess.run(cmd + ["--lat", str(lat), "--lon", str(lon), "--zoom", "15",
-                              "--marker", f"{lat},{lon}"])
+        cmd = mapscii_command() + ["--lat", str(lat), "--lon", str(lon), "--zoom", str(zoom)]
+        subprocess.run(cmd + (["--geojson", geojson] if geojson else ["--marker", f"{lat},{lon}"]))
     except (OSError, RuntimeError) as e:
         return f"h help    {c.RED}X {str(e)[:180]}{c.R}"
     finally:
@@ -1571,30 +1669,81 @@ def run_mapscii(term: Term, c: Colors, client: Optional[TeslaClient], st: "State
     return ""
 
 
+def route_summary(st: "State") -> str:
+    """'Monterey, CA, 115 km, 15:42 (+6 min traffic), 41% left' from the last data."""
+    ds   = jget(st.last_data or {}, "response.drive_state", {}) or {}
+    dest = ds.get("active_route_destination")
+    if not dest:
+        return ""
+    parts = [str(dest)]
+    if ds.get("active_route_miles_to_arrival") is not None:
+        mi = float(ds["active_route_miles_to_arrival"])
+        parts.append(f"{miles_to_km(mi)} km" if st.unit == "metric" else f"{mi:.0f} mi")
+    if ds.get("active_route_minutes_to_arrival") is not None:
+        at    = _dt.datetime.now() + _dt.timedelta(minutes=float(ds["active_route_minutes_to_arrival"]))
+        delay = int(float(ds.get("active_route_traffic_minutes_delay") or 0))
+        parts.append(at.strftime("%H:%M") + (f" (+{delay} min traffic)" if delay else ""))
+    if ds.get("active_route_energy_at_arrival") is not None:
+        parts.append(f"{int(float(ds['active_route_energy_at_arrival']))}% left")
+    return ", ".join(parts)
+
+
 def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
                  st: "State", ep: str) -> str:
-    """Commands that only show something; nothing is sent to the car."""
+    """Commands that only show something (chargers can also send one to the car)."""
+    def fail(msg: str) -> str:
+        return f"h help    {c.RED}X {msg[:180]}{c.R}"
+
+    if ep == "_route":
+        car_location(client, st, fresh=True)
+        st.route_until = time.time() + ROUTE_WATCH
+        route = route_summary(st)
+        return f"h help    {c.GRN}✓ Route: {route}{c.R}" if route else f"h help    {c.GRY}No active route{c.R}"
+
+    lat, lon = car_location(client, st)
+    if ep == "_maptui":
+        return run_mapscii(term, c, lat, lon, 15) if lat is not None else fail("car location unknown")
     if ep == "_map":
-        lat, lon = car_location(client, st)
         if lat is None:
-            return f"h help    {c.RED}X car location unknown{c.R}"
+            return fail("car location unknown")
         url = f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=17/{lat}/{lon}"
         log_cmd("map", url)
         how = "" if open_url_quietly(url) else " -- link in the log (z)"
         return f"h help    {c.GRN}✓ Map: {lat:.5f}, {lon:.5f}{how}{c.R}"
 
-    if ep == "_maptui":
-        return run_mapscii(term, c, client, st)
+    try:
+        sites = nearby_chargers(client, st)
+    except Exception as e:
+        return fail(api_error(e))
+    if ep == "_chargers":
+        site = show_chargers_pager(term, c, st, sites)
+        loc  = (site or {}).get("location") or {}
+        if loc.get("lat") is None:
+            return ""
+        st.route_until = time.time() + ROUTE_WATCH
+        return run_cmd(client, st, "navigation_gps_request", f"Navigating to {site.get('name', '?')}",
+                       {"lat": loc["lat"], "lon": loc["long"]}, c)
 
-    if client is None:
-        sites: Dict[str, Any] = DEMO_CHARGERS
-    else:
-        try:
-            sites = client.api_get(f"/vehicles/{st.vid}/nearby_charging_sites").get("response") or {}
-        except Exception as e:
-            return f"h help    {c.RED}X {str(e)[:180]}{c.R}"
-    show_chargers_pager(term, c, st, sites)
-    return ""
+    points = charger_points(sites)
+    if lat is not None:
+        points.insert(0, ("car", lat, lon, "car"))
+    if not points:
+        return fail("no locations to show")
+    if ep == "_maptui_chargers":
+        glyphs = {"car": ("●", "#ff0000"), "superchargers": ("◆", "#ff8800"),
+                  "destination_charging": ("◆", "#0088ff")}
+        path = cache_file("chargers.geojson")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"type": "FeatureCollection", "features": [
+                {"type": "Feature", "geometry": {"type": "Point", "coordinates": [plon, plat]},
+                 "properties": {"label": name, "glyph": glyphs[kind][0], "color": glyphs[kind][1]}}
+                for kind, plat, plon, name in points]}, f)
+        return run_mapscii(term, c, points[0][1], points[0][2], 12, path)
+    path = cache_file("map.html")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(_MAP_HTML.replace("__POINTS__", json.dumps(points)))
+    how = "" if open_url_quietly("file://" + path) else f" -- open {path}"
+    return f"h help    {c.GRN}✓ Map: car and {len(points) - (lat is not None)} chargers{how}{c.R}"
 
 
 # =============================================================================
@@ -1617,6 +1766,10 @@ class State:
     vc: Optional[VcBackend] = None               # set when vc mode is set up
     min_refresh: int = 1
     last_data: Optional[Dict[str, Any]] = None   # last vehicle_data shown, for set_temps
+    data_at: float = 0.0         # when last_data was fetched
+    route_until: float = 0.0     # ask for the location (and route) until then
+    let_sleep: bool = True       # only poll the state while the car is idle, so it can sleep
+    notify: Optional[Callable[[str], None]] = None   # shows progress on the message line
 
 
 # =============================================================================
@@ -1640,7 +1793,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     frame.row2(c, kcap("r", "refresh"),     "", kcap("s", "style"),    "")
     frame.row2(c, kcap("-", "refresh -5s"), "", kcap("i", "invert"),   "")
     frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
-    frame.row1(c, kcap("q", "quit"), "")
+    frame.row2(c, kcap("q", "quit"),        "", kcap("w", "sleep/awake"), "")
 
     cmd_frame = Frame(content_w=content_w, lbl_w=lbl_w)
     cmd_frame.section(c, "COMMANDS")
@@ -1661,6 +1814,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
                   "style:",   f"{c.GRY}{'fancy' if c.fancy else 'minimal'}{c.R}")
     frame.row2(c, "refresh:", f"{c.GRY}{st.refresh_interval}s{c.R}",
                   "colors:",  f"{c.GRY}{'inv' if c.inverted else 'normal'}{'/bw' if c.bw else '/col'}{c.R}")
+    frame.row2(c, "sleep:",   f"{c.GRY}{'when idle' if st.let_sleep else 'kept awake'}{c.R}", "", "")
     frame.blank()
     frame.row1(c, f"{c.GRY}h close help{c.R}", "")
 
@@ -1856,8 +2010,11 @@ def _pager_search_prompt(term: Term, c: Colors,
     return (pat, [i for i, ln in enumerate(plain_lines) if rx.search(ln)])
 
 
-def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "") -> None:
-    """Built-in scrollable + searchable pager. Accepts pre-built line list."""
+def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "",
+                   picks: Optional[List[int]] = None) -> Optional[int]:
+    """Built-in scrollable + searchable pager. Accepts pre-built line list.
+    With picks (line numbers), j/k move a cursor over those lines and Enter
+    returns the chosen line number."""
     import select as _sel
 
     plain_lines = [strip_ansi(ln) for ln in all_lines]
@@ -1866,6 +2023,8 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
     search_pat = ""
     match_rows: List[int] = []
     match_idx  = 0
+    pick       = 0
+    chosen: Optional[int] = None
 
     def clamp(n: int) -> int:
         _, term_h = term.get_size()
@@ -1893,7 +2052,9 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
                 term.write("\n")
                 continue
             line = all_lines[idx]
-            if search_pat and idx == cur_match_row:
+            if picks and idx == picks[pick]:
+                line = f"{c.REV}{strip_ansi(line)}{c.R}"
+            elif search_pat and idx == cur_match_row:
                 line = f"{c.YLW}{c.B}{strip_ansi(line)}{c.R}"
             elif search_pat:
                 try:
@@ -1912,7 +2073,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
         bar_title = title or "pager"
         term.write(
             f"{c.REV} {bar_title}  {pct}%{patinfo}{minfo}"
-            f"  j/k d/u g/G  /search  n/N  q close {c.R}"
+            f"  j/k d/u g/G  /search  n/N  {'Enter navigate  ' if picks else ''}q close {c.R}"
         )
         term.move(term_h - 1, 0)
         term.clear_line()
@@ -1933,6 +2094,14 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
 
         if ch in ("q", "\x1b", "?", "z"):
             break
+        elif picks and ch in ("\r", "\n"):
+            chosen = picks[pick]
+            break
+        elif picks and ch in ("j", "k"):
+            pick = max(0, min(len(picks) - 1, pick + (1 if ch == "j" else -1)))
+            visible = max(1, term_h - 2)
+            if not scroll_top <= picks[pick] < scroll_top + visible:
+                scroll_top = clamp(picks[pick] - (0 if ch == "k" else visible - 1))
         elif ch == "j":
             scroll_top = clamp(scroll_top + 1)
         elif ch == "k":
@@ -1961,6 +2130,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "")
 
     term.home()
     term.clear_to_end()
+    return chosen
 
 
 def show_log_pager(term: Term, c: Colors) -> None:
@@ -1994,8 +2164,10 @@ def show_log_pager(term: Term, c: Colors) -> None:
     _pager_builtin(term, c, all_lines, title=f"Command log  {len(entries)} entries")
 
 
-def show_chargers_pager(term: Term, c: Colors, st: "State", sites: Dict[str, Any]) -> None:
-    """Nearby charging sites (from nearby_charging_sites) in the builtin pager."""
+def show_chargers_pager(term: Term, c: Colors, st: "State",
+                        sites: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Nearby charging sites (from nearby_charging_sites) in the builtin pager;
+    returns the one picked with Enter."""
     dist_u = "km" if st.unit == "metric" else "mi"
 
     def dist(site: Dict[str, Any]) -> str:
@@ -2003,7 +2175,8 @@ def show_chargers_pager(term: Term, c: Colors, st: "State", sites: Dict[str, Any
         return f"{d * 1.60934 if st.unit == 'metric' else d:6.1f} {dist_u}"
 
     all_lines: List[str] = [
-        f"  {c.B}{c.MAG}NEARBY CHARGERS{c.R}  {c.GRY}q/Esc close  j/k scroll{c.R}", ""]
+        f"  {c.B}{c.MAG}NEARBY CHARGERS{c.R}  {c.GRY}j/k select  Enter send to car  q/Esc close{c.R}", ""]
+    picked: Dict[int, Dict[str, Any]] = {}
     for title, key in (("Superchargers", "superchargers"), ("Destination", "destination_charging")):
         all_lines += ["", f"  {c.B}{c.MAG}{title}{c.R}"]
         for site in sites.get(key) or []:
@@ -2014,11 +2187,13 @@ def show_chargers_pager(term: Term, c: Colors, st: "State", sites: Dict[str, Any
                 stalls = f"  {col}{free}/{site.get('total_stalls')} free{c.R}"
                 if site.get("site_closed"):
                     stalls = f"  {c.RED}closed{c.R}"
+            picked[len(all_lines)] = site
             all_lines.append(f"  {c.GRY}{dist(site)}{c.R}  {c.CYN}{site.get('name', '?')}{c.R}{stalls}")
         if not sites.get(key):
             all_lines.append(f"  {c.GRY}(none){c.R}")
     all_lines.append("")
-    _pager_builtin(term, c, all_lines, title="Nearby chargers")
+    row = _pager_builtin(term, c, all_lines, title="Nearby chargers", picks=list(picked) or None)
+    return picked.get(row) if row is not None else None
 
 
 # =============================================================================
@@ -2027,7 +2202,7 @@ def show_chargers_pager(term: Term, c: Colors, st: "State", sites: Dict[str, Any
 
 def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> None:
     st.last_data = data
-    term_w, _ = term.get_size()
+    term_w, term_h = term.get_size()
     lbl_w, val_w = 9, 20
     col_w    = 2 + lbl_w + val_w
     content_w = min((col_w * 2 + 2), term_w)
@@ -2121,11 +2296,12 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     px_clm = "\U0001f321 " if c.fancy else ""
     px_drv = "\U0001f697 " if c.fancy else ""
     px_sec = "\U0001f6e1 " if c.fancy else ""
+    px_nav = "\U0001f9ed " if c.fancy else ""
 
     frame.blank()
     frame.cat_labels = False
 
-    ts = _dt.datetime.now().strftime("%b %d, %H:%M")
+    ts = _dt.datetime.fromtimestamp(st.data_at or time.time()).strftime("%b %d, %H:%M")
     frame.row2(c,
         f"{c.B}{c.R}{name} {model}{c.R}, {odo} {dist_u}", "",
         f"{sc}{state}{c.R}", f"{c.GRY}[{mode_c}{st.mode}{c.R}{c.GRY}]{c.R}")
@@ -2156,6 +2332,25 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     frame.row2(c, "F right", tyre(fr), "Panels", f"{dr_c}{dr_l}{c.R}")
     frame.row2(c, "R left",  tyre(rl), "Sentry", f"{sn_c}{sn_l}{c.R}")
     frame.row2(c, "R right", tyre(rr), "Valet",  f"{vl_c}{vl_l}{c.R}")
+
+    # The route, when there is one and the window has room for it.
+    ds = jget(data, "response.drive_state", {}) or {}
+    if ds.get("active_route_destination") and len(frame.lines) + 6 <= term_h:
+        frame.cat_labels = False
+        frame.section(c, f"{px_nav}ROUTE")
+        frame.cat_labels = True
+        far = ""
+        if ds.get("active_route_miles_to_arrival") is not None:
+            mi  = float(ds["active_route_miles_to_arrival"])
+            far = f", {miles_to_km(mi) if st.unit == 'metric' else int(round(mi))} {dist_u}"
+        frame.row1(c, "To", f"{ds['active_route_destination']}{far}")
+        mins, left = ds.get("active_route_minutes_to_arrival"), ds.get("active_route_energy_at_arrival")
+        delay = int(float(ds.get("active_route_traffic_minutes_delay") or 0))
+        at = ((_dt.datetime.now() + _dt.timedelta(minutes=float(mins))).strftime("%H:%M")
+              + (f" {c.YLW}+{delay} min{c.R}" if delay else "")) if mins is not None else "?"
+        lc = c.GRN if left is None or float(left) >= 20 else c.YLW if float(left) >= 10 else c.RED
+        frame.row2(c, "Arrival", at, "Energy",
+                   f"{lc}{int(float(left))}%{c.R}" if left is not None else "?")
 
     frame.blank()
     frame.cat_labels = False
@@ -2260,6 +2455,13 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
         st.unit = "us" if st.unit == "metric" else "metric"
         return False
 
+    if key == "w":
+        st.let_sleep = not st.let_sleep
+        st.cmd_msg = (f"h help    {c.GRN}✓ The car may sleep when idle (:wake wakes it){c.R}"
+                      if st.let_sleep else f"h help    {c.GRN}✓ Keeping the car awake{c.R}")
+        st.cmd_msg_at = 0.0
+        return False
+
     if key == "s":
         c.fancy = not c.fancy
         return False
@@ -2302,6 +2504,8 @@ def main() -> int:
     ap.add_argument("-r", "--refresh", type=int, default=5, metavar="SECONDS",
                     help="Refresh interval in s (default: 5)")
     ap.add_argument("-i", "--invert",  action="store_true")
+    ap.add_argument("-w", "--keep-awake", action="store_true",
+                    help="Keep the car awake instead of letting it sleep when idle (w toggles)")
     ap.add_argument("-s", "--simple",  action="store_true", help="Disable fancy style")
     ap.add_argument("-c", "--color",   action="store_true", help="Enable colors (default: off)")
     ap.add_argument("-b", "--bw",      action="store_true", help=argparse.SUPPRESS)  # now the default
@@ -2332,6 +2536,7 @@ def main() -> int:
         mode=args.mode,
         unit=args.unit,
         refresh_interval=max(1, args.refresh),
+        let_sleep=not args.keep_awake,
         target_vin=os.environ.get("TESLA_VIN", "") or "",
         myteslamate_token=os.environ.get("MYTESLAMATE_TOKEN", "") or load_token(MTM_TOKEN_FILE),
     )
@@ -2420,6 +2625,11 @@ def main() -> int:
             vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
         st.vid   = vid
 
+        def notify(msg: str) -> None:
+            term.move(st.prompt_row, 0); term.clear_line()
+            term.write(" " * max(0, st.prompt_col - 10) + f"{c.YLW}{msg}{c.R}")
+        st.notify = notify
+
         if not st.target_vin and vin:
             st.target_vin = vin
 
@@ -2429,70 +2639,103 @@ def main() -> int:
 
         data: Optional[Dict[str, Any]] = None
         _wake_attempt = 0   # counts consecutive failed wake cycles
+        forced = True       # fetch now: at start, after r or a command
 
         while True:
-            # ── Try a quick data fetch first (car may already be awake) ──
-            try:
-                data = client.get_vehicle_data(vid)
-            except Exception:
-                data = None
-
-            if not data:
-                _wake_attempt += 1
-                term.home(); term.clear_to_end()
-
-                # Refresh the access token in case it expired while asleep
+            if st.let_sleep:
+                # Only the state is polled while the car is idle, so that it can
+                # fall asleep; it is never woken up from here.
                 try:
-                    client.refresh_access_token()
-                except Exception as e:
-                    term.write(f"{c.YLW}Token refresh failed: {e!s:.60}  retrying…{c.R}\n")
-                    time.sleep(5)
-                    continue
-
-                # Send wake command (best-effort; car may already be waking)
-                try:
-                    term.write(f"{c.YLW}Waking vehicle (attempt {_wake_attempt})…{c.R}\n")
-                    client.wake_up(vid)
-                except Exception as e:
-                    term.write(f"{c.YLW}Wake request failed: {e!s:.60}{c.R}\n")
-                    # Don't give up — network may still be coming up; keep polling
-
-                # Poll for up to 60 s before declaring this cycle failed
-                # (less often when each request is billed)
-                poll = 3 if refresh_token else 10
-                for i in range(60 // poll):
-                    time.sleep(poll)
-                    term.home(); term.clear_to_end()
-                    term.write(
-                        f"{c.YLW}Waiting for vehicle"
-                        f" (cycle {_wake_attempt}, {(i+1)*poll}s)…{c.R}\n"
-                    )
+                    state = client.get_state(vid)
+                except Exception:
+                    state = "unknown"
+                new = None
+                if state == "online" and (forced or data is None or car_busy(data)):
                     try:
-                        data = client.get_vehicle_data(vid)
-                        if data:
-                            break
+                        new = client.get_vehicle_data(vid, wants_location(st))
                     except Exception:
                         pass
+                if new:
+                    data, st.data_at = new, time.time()
+                elif data:
+                    data["response"]["state"] = state
+                else:
+                    data = {"response": {"vin": st.target_vin, "state": state}}
+            else:
+                # ── Try a quick data fetch first (car may already be awake) ──
+                try:
+                    new = client.get_vehicle_data(vid, wants_location(st))
+                except Exception:
+                    new = None
 
-            if not data:
-                # Exponential-ish backoff between wake cycles, capped at 30 s
-                backoff = min(30, 5 * _wake_attempt)
-                term.home(); term.clear_to_end()
-                term.write(
-                    f"{c.YLW}Vehicle unreachable after cycle {_wake_attempt}."
-                    f" Retrying in {backoff}s…{c.R}\n"
-                )
-                time.sleep(backoff)
-                continue
+                if not new:
+                    _wake_attempt += 1
+                    term.home(); term.clear_to_end()
 
-            _wake_attempt = 0   # reset on successful data fetch
+                    # Refresh the access token in case it expired while asleep
+                    try:
+                        client.refresh_access_token()
+                    except Exception as e:
+                        term.write(f"{c.YLW}Token refresh failed: {e!s:.60}  retrying…{c.R}\n")
+                        time.sleep(5)
+                        continue
 
+                    # Send wake command (best-effort; car may already be waking)
+                    try:
+                        term.write(f"{c.YLW}Waking vehicle (attempt {_wake_attempt})…{c.R}\n")
+                        client.wake_up(vid)
+                    except Exception as e:
+                        term.write(f"{c.YLW}Wake request failed: {e!s:.60}{c.R}\n")
+                        # Don't give up — network may still be coming up; keep polling
+
+                    # Poll for up to 60 s before declaring this cycle failed
+                    # (less often when each request is billed)
+                    poll = 3 if refresh_token else 10
+                    for i in range(60 // poll):
+                        time.sleep(poll)
+                        term.home(); term.clear_to_end()
+                        term.write(
+                            f"{c.YLW}Waiting for vehicle"
+                            f" (cycle {_wake_attempt}, {(i+1)*poll}s)…{c.R}\n"
+                        )
+                        try:
+                            new = client.get_vehicle_data(vid)
+                            if new:
+                                break
+                        except Exception:
+                            pass
+
+                if not new:
+                    # Exponential-ish backoff between wake cycles, capped at 30 s
+                    backoff = min(30, 5 * _wake_attempt)
+                    term.home(); term.clear_to_end()
+                    term.write(
+                        f"{c.YLW}Vehicle unreachable after cycle {_wake_attempt}."
+                        f" Retrying in {backoff}s…{c.R}\n"
+                    )
+                    time.sleep(backoff)
+                    continue
+
+                _wake_attempt = 0   # reset on successful data fetch
+                data, st.data_at = new, time.time()
+
+            st.last_data = data
             while True:
                 if st.show_help:
                     render_help(term, c, st)
+                elif "charge_state" not in data["response"]:    # asleep since start: no data yet
+                    term.home(); term.clear_to_end()
+                    term.write(f"Vehicle {data['response']['state']}, left to sleep."
+                               f"  w: wake it and keep it awake  :  command  q: quit\n")
                 else:
                     render_dashboard(term, c, st, data)
-                if handle_key(term, c, st, client, term.read_key_timeout(st.refresh_interval)):
+                key = term.read_key_timeout(st.refresh_interval)
+                if handle_key(term, c, st, client, key):
+                    forced = key is not None
+                    if forced and not st.show_help and "charge_state" in data["response"]:
+                        # Back from a command or view: show the last data at once,
+                        # then fetch.
+                        render_dashboard(term, c, st, data)
                     break
 
     except KeyboardInterrupt:

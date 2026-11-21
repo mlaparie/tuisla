@@ -35,7 +35,7 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car.
 
 ## Use
 
-`h` help · `?` all commands · `:` type a command · `q` quit
+`h` help · `?` all commands · `:` type a command · `w` keep the car awake · `q` quit
 
 ## Modes
 
@@ -47,7 +47,13 @@ See `./tuisla --help` for more options.
 
 ## Commands
 
-Press `?` for the full list. Besides the usual lock, climate and charging commands, there are seat heating and cooling (`seat heat driver 2`), climate keeper and dog mode (`keeper dog`), cabin overheat protection, Guest Mode, PIN to Drive, speed limit, renaming the car, sending a destination (`navigate 1 Main St, Springfield`), Homelink, waking the car, and three read-only ones: `map` (the car's location on OpenStreetMap in the browser), `maptui` (the same in the terminal with [mapscii](https://github.com/rastapasta/mapscii); its version with start coordinates is still [a pull request](https://github.com/rastapasta/mapscii/pull/161), which tuisla fetches and builds on first use with git and Node.js) and `chargers` (nearby Superchargers with free stalls).
+Press `?` for the full list. Besides the usual lock, climate and charging commands, there are seat heating and cooling (`seat heat driver 2`), climate keeper and dog mode (`keeper dog`), cabin overheat protection, Guest Mode, PIN to Drive, speed limit, renaming the car, sending a destination (`navigate 1 Main St, Springfield` or `navigate gps 37.49 -121.94`), Homelink, waking the car, and:
+
+- `map` / `maptui`: the car's location on OpenStreetMap in the browser, or in the terminal with [mapscii](https://github.com/rastapasta/mapscii) (its version with start coordinates is still [a pull request](https://github.com/rastapasta/mapscii/pull/161), which tuisla fetches and builds on first use with git and Node.js; on Guix: `guix install node git`). `map chargers` and `maptui chargers` add the nearby chargers.
+- `chargers`: nearby Superchargers with free stalls and destination chargers; pick one with `j`/`k` and press Enter to send it to the car as the destination.
+- `route`: the destination, distance, arrival time and battery left at arrival. While a route is active the dashboard shows it too.
+
+The car cannot be put to sleep through the API, but it falls asleep on its own when nothing asks it for data for about 15 minutes. tuisla lets it by default: it only polls whether the car is awake, fetches data only while the car is driving, charging or conditioning (or when you press `r`), and wakes it only to deliver a command, after which it falls asleep again. Press `w` (or start with `-w`) to keep it awake instead; `:wake` wakes it once.
 
 Not possible: Sentry Mode and dashcam clips are only stored on the car's USB drive, and the live Sentry camera view only works in Tesla's own app; no API gives access to them.
 
