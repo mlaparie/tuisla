@@ -1757,6 +1757,20 @@ def car_location(client: Optional[TeslaClient], st: "State",
     return (lat, lon) if lat is not None and lon is not None else (None, None)
 
 
+def position_age(st: "State") -> str:
+    """"position from 20 Feb" when the car's last GPS fix is over a day old
+    (Tesla sometimes stops refreshing it), else ""."""
+    t = jget(st.last_data or {}, "response.drive_state.gps_as_of", None)
+    try:
+        t = float(t)
+    except (TypeError, ValueError):
+        return ""
+    if time.time() - t < 86400:
+        return ""
+    at = _dt.datetime.fromtimestamp(t)
+    return "position from " + at.strftime("%-d %b" + (" %Y" if at.year != _dt.date.today().year else ""))
+
+
 def open_url_quietly(url: str) -> bool:
     """Open url in a graphical browser without writing to the terminal (the
     webbrowser module may start a text browser inside the TUI instead)."""
@@ -2037,6 +2051,17 @@ def route_summary(st: "State") -> str:
 def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
                  st: "State", ep: str) -> str:
     """Commands that only show something (chargers can also send one to the car)."""
+    msg = _run_info_cmd(term, c, client, st, ep)
+    old = position_age(st) if ep != "_mapscii_world" else ""
+    if not old:
+        return msg
+    if not msg:                         # back from mapscii or the chargers list
+        return f"h help    {c.YLW}Car {old}{c.R}"
+    return f"{msg}  {c.YLW}({old}){c.R}" if "✓" in msg else msg
+
+
+def _run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
+                  st: "State", ep: str) -> str:
     def fail(msg: str) -> str:
         return f"h help    {c.RED}X {msg[:180]}{c.R}"
 
@@ -2567,7 +2592,8 @@ def show_chargers_pager(term: Term, c: Colors, st: "State",
 
     all_lines: List[str] = [
         f"  {c.B}{c.MAG}CHARGERS WITHIN {range_text(st)}{c.R}  "
-        f"{c.GRY}j/k select  Enter send to car  q close{c.R}", ""]
+        + (f"{c.YLW}{position_age(st)}{c.R}  " if position_age(st) else "")
+        + f"{c.GRY}j/k select  Enter send to car  q close{c.R}", ""]
     picked: Dict[int, Dict[str, Any]] = {}
     for title, key in (("Superchargers", "superchargers"), ("Destination", "destination_charging")):
         all_lines += ["", f"  {c.B}{c.MAG}{title}{c.R}"]
