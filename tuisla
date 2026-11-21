@@ -127,18 +127,18 @@ DEMO_DATA = {
     }
 }
 
-DEMO_CHARGERS = {
+DEMO_CHARGERS = {     # real Superchargers near the demo car; free stalls made up
     "superchargers": [
-        {"name": "Springfield Supercharger", "distance_miles": 1.7, "available_stalls": 9, "total_stalls": 20,
-         "location": {"lat": 48.8900, "long": 2.3800}},
-        {"name": "Shelbyville Supercharger", "distance_miles": 3.9, "available_stalls": 0, "total_stalls": 12,
-         "location": {"lat": 48.8300, "long": 2.3000}},
-        {"name": "Ogdenville Supercharger", "distance_miles": 43.4, "available_stalls": 5, "total_stalls": 16,
-         "location": {"lat": 49.4200, "long": 2.8200}},
+        {"name": "Paris, France - Bercy", "distance_miles": 2.4, "available_stalls": 7, "total_stalls": 12,
+         "location": {"lat": 48.83684, "long": 2.38588}},
+        {"name": "Thiais, France", "distance_miles": 7.8, "available_stalls": 21, "total_stalls": 32,
+         "location": {"lat": 48.754819, "long": 2.373043}},
+        {"name": "Vélizy, France - Avenue de l'Europe", "distance_miles": 8.7, "available_stalls": 0,
+         "total_stalls": 30, "location": {"lat": 48.784006, "long": 2.220934}},
+        {"name": "Beauvais, France", "distance_miles": 39.1, "available_stalls": 9, "total_stalls": 16,
+         "location": {"lat": 49.410005, "long": 2.11371}},
     ],
-    "destination_charging": [
-        {"name": "Demo Hotel", "distance_miles": 0.8, "location": {"lat": 48.8720, "long": 2.3480}},
-    ],
+    "destination_charging": [],
 }
 
 
@@ -2410,7 +2410,7 @@ def show_chargers_pager(term: Term, c: Colors, st: "State",
 
     all_lines: List[str] = [
         f"  {c.B}{c.MAG}CHARGERS WITHIN {range_text(st)}{c.R}  "
-        f"{c.GRY}j/k select  Enter send to car  q/Esc close  (:chargers KM sets the range){c.R}", ""]
+        f"{c.GRY}j/k select  Enter send to car  q close{c.R}", ""]
     picked: Dict[int, Dict[str, Any]] = {}
     for title, key in (("Superchargers", "superchargers"), ("Destination", "destination_charging")):
         all_lines += ["", f"  {c.B}{c.MAG}{title}{c.R}"]

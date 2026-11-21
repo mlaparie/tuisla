@@ -7,11 +7,14 @@ mode, from a temporary copy (so it logs there and sees no tokens).
 Usage: demo/record-tmux.py [OUT.cast]      (default: demo/tuisla.cast)
 Needs: tmux, python3, and node for the mapscii part (on Guix:
 guix shell node -- demo/record-tmux.py).
-Make the GIF with agg (on Guix, the asciinema-agg package; the emoji font
-draws the icons of the fancy style):
-    guix shell asciinema-agg font-dejavu font-google-noto-emoji -- sh -c \
-      'agg --font-dir "$GUIX_ENVIRONMENT/share/fonts" \
-           --font-family "DejaVu Sans Mono,Noto Color Emoji" demo/tuisla.cast demo/tuisla.gif'"""
+Make the GIF with agg (on Guix, the asciinema-agg package).  The fonts draw
+the icons of the fancy style: Noto Sans Symbols 2 first, so that the icons
+terminals give one column (thermometer, shield) are not drawn two wide over
+their title, then Noto Color Emoji for the others:
+    guix shell asciinema-agg font-iosevka-term font-google-noto font-google-noto-emoji -- \
+      sh -c 'agg --font-dir "$GUIX_ENVIRONMENT/share/fonts" \
+             --font-family "Iosevka Term,Noto Sans Symbols 2,Noto Color Emoji" \
+             demo/tuisla.cast demo/tuisla.gif'"""
 import codecs, fcntl, json, os, pty, select, shlex, shutil, struct, subprocess, sys
 import tempfile, termios, time
 
