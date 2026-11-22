@@ -1043,7 +1043,15 @@ class TeslaClient:
         return self._http(req, ctx=ctx)
 
     def api_get(self, path: str) -> Dict[str, Any]:
-        return self._request("GET", self.api_base + path, None, None, None)
+        if not self.access_token:          # started offline: none yet
+            self.refresh_access_token()
+        try:
+            return self._request("GET", self.api_base + path, None, None, None)
+        except RuntimeError as e:
+            if not str(e).startswith("HTTP 401"):
+                raise
+            self.refresh_access_token()        # expired meanwhile
+            return self._request("GET", self.api_base + path, None, None, None)
 
     def api_post(self, url: str, body: Optional[Dict[str, Any]] = None,
                  ctx: Optional[ssl.SSLContext] = None, bearer: Optional[str] = None) -> Dict[str, Any]:
@@ -1288,6 +1296,11 @@ class VcBackend:
 # =============================================================================
 #  Command execution
 # =============================================================================
+
+def offline(e: Exception) -> bool:
+    """A network failure (no connection, unknown host), not an answer from Tesla."""
+    return not str(e).startswith(("HTTP ", "Token refresh failed"))
+
 
 def api_error(e: Exception) -> str:
     """The readable part of an API error: "HTTP 400: {"error": ...}" -> the error."""
@@ -3247,27 +3260,43 @@ def main() -> int:
             client = st.vc.client
             st.min_refresh      = FLEET_MIN_REFRESH
             st.refresh_interval = max(st.refresh_interval, FLEET_MIN_REFRESH)
+        # The last data seen, kept so that a sleeping or unreachable car (an
+        # underground car park) still shows its last known state, and so that
+        # tuisla starts without network (Bluetooth in vc mode).
+        try:
+            saved = json.loads(load_token(LAST_DATA_FILE) or "{}")
+        except ValueError:
+            saved = {}
+
         term.home(); term.clear_to_end()
         term.write("Authenticating…\n")
         cached = client.use_cached_token()
-        if not cached:
-            try:
-                client.refresh_access_token()
-            except RuntimeError:
-                # An env token goes stale once Tesla rotates it; the saved one is newer.
-                if not (env_token and saved_token and saved_token != env_token):
-                    raise
-                term.write("TESLA_REFRESH_TOKEN rejected, trying the saved token…\n")
-                client.refresh_token = saved_token
-                client.refresh_access_token()
-        term.write("Looking up vehicle…\n")
         try:
-            vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
+            if not cached:
+                try:
+                    client.refresh_access_token()
+                except RuntimeError as e:
+                    # An env token goes stale once Tesla rotates it; the saved one is newer.
+                    if not (env_token and saved_token and saved_token != env_token) or offline(e):
+                        raise
+                    term.write("TESLA_REFRESH_TOKEN rejected, trying the saved token…\n")
+                    client.refresh_token = saved_token
+                    client.refresh_access_token()
+            term.write("Looking up vehicle…\n")
+            try:
+                vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
+            except RuntimeError as e:
+                if not (cached and str(e).startswith("HTTP 401")):
+                    raise
+                client.refresh_access_token()      # the saved access token was revoked
+                vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
         except RuntimeError as e:
-            if not (cached and str(e).startswith("HTTP 401")):
+            vin = str(jget(saved, "data.response.vin", "") or "")
+            vid = str(saved.get("vid") or jget(saved, "data.response.id_s", "")
+                      or jget(saved, "data.response.id", "") or "")
+            if not (offline(e) and vid and vin and st.target_vin in ("", vin)):
                 raise
-            client.refresh_access_token()      # the saved access token was revoked
-            vid, vin = client.get_vehicle_id_and_vin(st.target_vin)
+            log_cmd("start", f"X {api_error(e)[:100]}; offline, showing the last data seen")
         st.vid   = vid
 
         dirty = threading.Event()           # new data or message: redraw
@@ -3287,12 +3316,6 @@ def main() -> int:
         data: Optional[Dict[str, Any]] = None
         poll = 3 if refresh_token else 10   # s between tries while waking (billed without)
 
-        # The last data seen, kept so that a sleeping or unreachable car (an
-        # underground car park) still shows its last known state.
-        try:
-            saved = json.loads(load_token(LAST_DATA_FILE) or "{}")
-        except ValueError:
-            saved = {}
         if jget(saved, "data.response.vin") == st.target_vin:
             data, st.data_at = saved["data"], float(saved.get("at") or 0)
         st.last_data = data
@@ -3300,7 +3323,7 @@ def main() -> int:
         def keep(new: Dict[str, Any]) -> Dict[str, Any]:
             st.data_at = time.time()
             try:
-                save_token(json.dumps({"at": st.data_at, "data": new}), LAST_DATA_FILE)
+                save_token(json.dumps({"at": st.data_at, "vid": vid, "data": new}), LAST_DATA_FILE)
             except OSError:
                 pass
             return new

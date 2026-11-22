@@ -139,7 +139,7 @@ Besides Tesla's commands, a few custom ones are added to list nearby Supercharge
 
 ## Sleep
 
-`tuisla` lets the car sleep when it is idle and wakes it only for commands: `w` wakes it, `W` (or `-W`) keeps it awake. While it sleeps or is out of reach, the dashboard shows the last data seen.
+`tuisla` lets the car sleep when it is idle and wakes it only for commands: `w` wakes it, `W` (or `-W`) keeps it awake. While it sleeps or is out of reach, the dashboard shows the last data seen; `tuisla` also starts that way without network, and vc mode then sends commands over Bluetooth.
 
 ## Disclaimer
 
