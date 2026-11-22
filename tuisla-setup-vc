@@ -104,7 +104,7 @@ def setup_vc() -> int:
     """Interactive, resumable walk-through of everything vc mode needs."""
     cfg: Dict[str, Any] = load_vc_config()
     secret = ""
-    total  = 8
+    total  = 9
 
     def save() -> None:
         save_token(json.dumps(cfg, indent=2), VC_CONFIG)
@@ -544,6 +544,59 @@ you to tap your key card on the console; do it.""")
                 print(f"X {api_error(e)}  (the car may be asleep: try again in tuisla)")
             finally:
                 vc.stop()
+        # ── 9. Bluetooth (optional) ────────────────────────────────────────
+        step(9, "Bluetooth, for when there is no network (optional)")
+        print("The key added in step 7 works over the internet only: cars refuse Bluetooth\n"
+              "commands from keys added through the Tesla app link.  To send commands\n"
+              "without network (an underground car park, your phone offline), the same key\n"
+              "must also be added over Bluetooth, as an owner key.  This is done next to the\n"
+              "car, from this device, with your key card at hand.\n")
+        ble = find_go_tool("tesla-control")
+        if cfg.get("ble_key") == vin:
+            print(f"✓ The key already works over Bluetooth on {vin}")
+        elif not ble:
+            print("! tesla-control is missing (see step 1); run tuisla --setup-vc again once\n"
+                  "  it is installed to do this step.")
+        elif yes("Add the key over Bluetooth now?", default=False):
+
+            def ble_run(*args: str, key: bool = False) -> subprocess.CompletedProcess:
+                cmd = [ble, "-ble", "-vin", vin]
+                if key:
+                    cmd += ["-key-file", vc_file("private.pem"), "-session-cache", vc_file("ble-session.json")]
+                try:
+                    return subprocess.run(cmd + list(args), capture_output=True, text=True,
+                                          stdin=subprocess.DEVNULL, timeout=60)
+                except subprocess.TimeoutExpired:
+                    return subprocess.CompletedProcess(cmd, 1, "", "no answer from the car in 60 s")
+
+            def ble_err(out: subprocess.CompletedProcess) -> str:
+                if "CAP_NET_ADMIN" in out.stderr:
+                    return f"tesla-control may not use Bluetooth; run: sudo setcap cap_net_admin=eip {ble}"
+                return ((out.stderr.strip().splitlines() or ["failed"])[-1])[:200]
+
+            print("Turn Bluetooth on here and stand next to the car (inside is best).")
+            pause("Press Enter when ready")
+            out = ble_run("add-key-request", vc_file("public.pem"), "owner", "cloud_key")
+            if out.returncode:
+                print(f"X {ble_err(out)}\n  Check that Bluetooth is on and the car is close, then run\n"
+                      "  tuisla --setup-vc again.")
+            else:
+                print("Sent.  The car's screen now asks to add a key: tap your key card on the\n"
+                      "card reader on the centre console (under the phone charger, or behind the\n"
+                      "cup holders on older cars) to approve it.")
+                pause("Press Enter once the car has accepted it")
+                while True:
+                    out = ble_run("flash-lights", key=True)
+                    if out.returncode == 0:
+                        print("✓ The lights flashed: the key works over Bluetooth.")
+                        cfg["ble_key"] = vin
+                        save()
+                        break
+                    print(f"X {ble_err(out)}")
+                    if not yes("Try again (tap the key card again if the car still asks)?"):
+                        print("Run tuisla --setup-vc again to retry this step.")
+                        break
+
         # What step 1 added is only needed for the setup: tesla-http-proxy is
         # a standalone program, and the keys are made.
         ours = "go" in shelled or "go" in cfg.get("installed", {}).get("tools", [])

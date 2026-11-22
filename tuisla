@@ -1205,6 +1205,8 @@ def ble_command(st: "State", ep: str, body: Optional[Dict[str, Any]]) -> Optiona
         return True, ""
     if "CAP_NET_ADMIN" in out.stderr:
         return False, f"Bluetooth needs: sudo setcap cap_net_admin=eip {tool}"
+    if "INSUFFICIENT_PRIVILEGES" in out.stderr:
+        return False, "Bluetooth: the key is not added over Bluetooth yet (tuisla --setup-vc, step 9)"
     return False, "Bluetooth: " + ((out.stderr.strip().splitlines() or ["failed"])[-1])[:150]
 
 
