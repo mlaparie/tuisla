@@ -1248,11 +1248,25 @@ def show_data_pager(term: "Term", c: "Colors", st: "State") -> None:
 
     at = _dt.datetime.fromtimestamp(st.data_at).strftime("%d %b %H:%M") if st.data_at else "?"
     add(f"Vehicle data, {at}", st.last_data or {})
+    def diff(new: Any, old: Any) -> Any:
+        """What new has that old lacks or has otherwise (timestamps left out)."""
+        if not (isinstance(new, dict) and isinstance(old, dict)):
+            return new
+        out = {}
+        for k, v in new.items():
+            if k in ("timestamp", "gps_as_of") or (k in old and old[k] == v):
+                continue
+            d = diff(v, old.get(k)) if k in old else v
+            if d != {}:
+                out[k] = d
+        return out
+
     try:
         with open(token_path(ROUTE_DUMP_FILE), encoding="utf-8") as f:
-            route = json.load(f)
+            fleet = json.load(f)
         at = _dt.datetime.fromtimestamp(os.path.getmtime(token_path(ROUTE_DUMP_FILE))).strftime("%d %b %H:%M")
-        add(f"Last Fleet API data (read for the route), {at}", route)
+        src = urllib.parse.urlsplit(str(fleet.pop("_from", "") or "")).hostname or "?"
+        add(f"Route read from {src}, {at}: what differs", diff(fleet, st.last_data or {}))
     except (OSError, ValueError):
         pass
     lines.append("")
@@ -1859,7 +1873,9 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
     try:
         if st.vc is not None:
             resp = st.vc.client.api_get(path)
+            src = st.vc.client.api_base
         elif st.mode == "mtm" and st.myteslamate_token:
+            src = MTM_API
             try:
                 resp = client._request("GET", MTM_API + path, None, None, st.myteslamate_token)
             except RuntimeError as e:
@@ -1876,13 +1892,13 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
         dump = token_path(ROUTE_DUMP_FILE)
         os.makedirs(os.path.dirname(dump), mode=0o700, exist_ok=True)
         with open(os.open(dump, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
-            json.dump(resp, f, indent=2, ensure_ascii=False)
+            json.dump({"_from": src, **resp}, f, indent=2, ensure_ascii=False)
         if os.path.exists(token_path("route_debug.json")):
             os.remove(token_path("route_debug.json"))
     except Exception:
         pass
-    log_cmd("route", "route-like keys: " + (", ".join(route_keys(resp)) or "none")
-            + f" (whole answer in {token_path(ROUTE_DUMP_FILE)})")
+    log_cmd("route", f"from {urllib.parse.urlsplit(src).hostname}; route-like keys: "
+            + (", ".join(route_keys(resp)) or "none") + f" (whole answer in {token_path(ROUTE_DUMP_FILE)})")
     ds = jget(resp, "response.drive_state", {}) or {}
     if ds.get("active_route_destination"):
         st.route = {k: v for k, v in ds.items() if k.startswith("active_route_")}
