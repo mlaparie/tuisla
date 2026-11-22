@@ -883,6 +883,43 @@ def setup_vc() -> None:
     os.execv(sys.executable, [sys.executable, script])
 
 
+SETTINGS_FILE = "settings.json"      # choices made at setup (the default mode)
+
+
+def load_settings() -> Dict[str, Any]:
+    try:
+        got = json.loads(load_token(SETTINGS_FILE) or "{}")
+    except ValueError:
+        got = {}
+    return got if isinstance(got, dict) else {}
+
+
+def ask_default_mode() -> None:
+    """At the end of a login or setup: which mode tuisla starts in (-m still wins)."""
+    have = {"mtm": bool(os.environ.get("MYTESLAMATE_TOKEN") or load_token(MTM_TOKEN_FILE)),
+            "vc": bool(load_vc_config().get("client_id") and load_token(FLEET_TOKEN_FILE))}
+    modes = [m for m in ("mtm", "vc") if have[m]] + ["ro"]
+    if len(modes) < 2:
+        return
+    names = {"mtm": "mtm: commands through MyTeslaMate", "vc": "vc: commands through your own key",
+             "ro": "ro: read-only, commands are only checked"}
+    now = load_settings().get("mode")
+    now = now if now in modes else modes[0]
+    print("\nWhich mode should tuisla start in? (tuisla -m MODE overrides it)")
+    for i, m in enumerate(modes, 1):
+        print(f"  {i}. {names[m]}")
+    try:
+        pick = input(f"Your choice [{modes.index(now) + 1}]: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    mode = modes[int(pick) - 1] if pick.isdigit() and 0 < int(pick) <= len(modes) else now
+    got = load_settings()
+    got["mode"] = mode
+    save_token(json.dumps(got), SETTINGS_FILE)
+    print(f"tuisla starts in {mode} mode (change it: tuisla --default-mode MODE).")
+
+
 def login_mtm() -> int:
     # MyTeslaMate has no API to hand out its token: it is shown in their web
     # app after signing in there with the Tesla account, so open it and have
@@ -921,6 +958,7 @@ def login_mtm() -> int:
     say(f"OK. Saved to {token_path(MTM_TOKEN_FILE)} -- just run tuisla now.")
     if os.environ.get("MYTESLAMATE_TOKEN"):
         say("! MYTESLAMATE_TOKEN is set and is used instead; unset it to use the saved token.")
+    ask_default_mode()
     return 0
 
 
@@ -3430,7 +3468,7 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
 def main() -> int:
     ap = argparse.ArgumentParser(add_help=True)
     ap.add_argument("-m", "--mode",    choices=["ro", "mtm", "vc"],
-                    help="Where commands go (default: mtm, or vc when only vc is set up)")
+                    help="Where commands go (default: the one chosen at setup, else mtm, or vc when only vc is set up)")
     ap.add_argument("-u", "--unit",    default="metric", choices=["metric", "us"])
     ap.add_argument("-r", "--refresh", type=int, default=5, metavar="SECONDS",
                     help="Refresh interval in s (default: 5)")
@@ -3448,6 +3486,8 @@ def main() -> int:
                     help="Save a MyTeslaMate API token (from their API tab), then exit")
     ap.add_argument("--print",         action="store_true",
                     help="With --login-tesla: print the Tesla token instead of saving it")
+    ap.add_argument("--default-mode",  choices=["ro", "mtm", "vc"],
+                    help="Mode tuisla starts in without -m (asked at --login and --setup-vc), then exit")
     ap.add_argument("--billing-day",   nargs=2, metavar=("MODE", "DAY"),
                     help="Day of the month the billing period of MODE (vc or mtm) starts, for "
                          "the counts in z (e.g. --billing-day vc 22), then exit")
@@ -3459,6 +3499,12 @@ def main() -> int:
         return login(print_token=args.print, then_mtm=args.login and not args.print)
     if args.login_mtm:
         return login_mtm()
+    if args.default_mode:
+        got = load_settings()
+        got["mode"] = args.default_mode
+        save_token(json.dumps(got), SETTINGS_FILE)
+        print(f"tuisla starts in {args.default_mode} mode")
+        return 0
     if args.billing_day:
         mode, day = args.billing_day
         if mode not in ("vc", "mtm") or not day.isdigit() or not 1 <= int(day) <= 31:
@@ -3469,8 +3515,9 @@ def main() -> int:
     if args.setup_vc:
         setup_vc()
 
+    saved_mode = load_settings().get("mode")
     st = State(
-        mode=args.mode or "mtm",
+        mode=args.mode or (saved_mode if saved_mode in ("ro", "mtm", "vc") else "mtm"),
         unit=args.unit,
         refresh_interval=max(1, args.refresh),
         let_sleep=not args.keep_awake,
@@ -3490,10 +3537,12 @@ def main() -> int:
                           os.environ.get("VEHICLE_COMMAND_URL", ""),
                           os.environ.get("VEHICLE_COMMAND_CERT", "") or "cert.pem")
         st.target_vin = st.target_vin or vc_cfg.get("vin", "")
-        if not args.mode and not st.myteslamate_token:
+        if not args.mode and not saved_mode and not st.myteslamate_token:
             st.mode = "vc"                  # set up instead of MyTeslaMate
-    elif st.mode == "vc":
+    elif args.mode == "vc":
         die("vc mode is not set up yet; run: tuisla --setup-vc")
+    elif st.mode == "vc":
+        st.mode = "mtm"                     # the saved default, but vc is gone
     c = Colors(fancy=(not args.simple), inverted=bool(args.invert), bw=args.bw)
 
     term   = Term()

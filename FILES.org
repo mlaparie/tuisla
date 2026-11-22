@@ -13,6 +13,7 @@ folder private.
 | =tuisla.log=                        | Every command sent and its result (=z= shows it)                     | No                                      |
 | =last_data.json=                    | The last vehicle data, shown while the car sleeps, is out of reach or tuisla is offline | No; deleted, it comes back              |
 | =last_route.json=                   | The last route read, shown while the car's screen is off (it then leaves it out) | No; deleted, it comes back              |
+| =settings.json=                     | The mode tuisla starts in, asked at =--login= and =--setup-vc= (=--default-mode=) | No; then mtm, or vc when only vc is set up |
 | =usage.json=                        | Billed requests (MyTeslaMate, Fleet API) per billing period, shown by =z=; billing days from =--billing-day= | No; deleted, the counts start again    |
 | =last_fleet_data.json=              | The car's whole data from the Fleet API, read for the route (=:route=, =!=) | No; deleted, it comes back              |
 | =vc.json=                           | vc mode settings (developer app, domain, region, car)                | For vc mode                             |

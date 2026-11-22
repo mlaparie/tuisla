@@ -37,7 +37,7 @@ _loader.exec_module(tuisla)
 
 from tuisla import (AUTHORIZE_URL, FLEET_REGIONS, FLEET_TOKEN_FILE, FLEET_TOKEN_URL,  # noqa: E402
                     VC_CONFIG, TeslaClient, VcBackend, _b64url, api_error, auth_post,
-                    find_go_tool, find_proxy, fleet_client, jget, load_token, load_usage,
+                    ask_default_mode, find_go_tool, find_proxy, fleet_client, jget, load_token, load_usage,
                     load_vc_config, parse_callback, save_token, set_billing_day, token_path, vc_file)
 
 FLEET_SCOPES     = "openid offline_access vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds"
@@ -614,8 +614,8 @@ you to tap your key card on the console; do it.""")
                 if subprocess.run(remove + pkgs).returncode == 0:
                     del cfg["installed"]
                     save()
-        print("\nAll set.  Start tuisla (it uses vc mode unless MyTeslaMate is set up too;\n"
-              "then use: tuisla -m vc).")
+        ask_default_mode()
+        print("\nAll set.  Start tuisla.")
         return 0
     except (KeyboardInterrupt, EOFError):
         print("\nStopped; run tuisla --setup-vc to carry on.")
