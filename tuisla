@@ -1194,13 +1194,69 @@ def usage_lines(c: "Colors") -> List[str]:
             continue
         start = usage_period(api, usage=got)
         per   = (got.get(api) or {}).get(start.isoformat()) or {}
-        n     = {k: int(per.get(k) or 0) for k in ("commands", "data", "wakes")}
-        cur   = "€" if api == "mtm" or eur else "$"
-        cost  = sum(n[k] * USAGE_PRICES[api][k] for k in n)
-        text  = (f"{name} since {start.strftime('%d %b')}: comm {n['commands']}, data {n['data']}, "
-                 f"wake {n['wakes']} = {cur}{cost:.2f}" + (f" of the {cur}10.00 monthly credit" if api == "vc" else ""))
-        out.append(f"  {c.YLW}{text}{c.R}")
+        out.append(f"  {c.YLW}{name} since {start.strftime('%d %b')}: {usage_text(api, per, eur)}{c.R}")
     return out
+
+
+def usage_text(api: str, per: Dict[str, Any], eur: bool) -> str:
+    """"comm 2, data 1, wake 1 = €0.02 of the €10.00 monthly credit" """
+    n    = {k: int(per.get(k) or 0) for k in ("commands", "data", "wakes")}
+    cur  = "€" if api == "mtm" or eur else "$"
+    cost = sum(n[k] * USAGE_PRICES[api][k] for k in n)
+    return (f"comm {n['commands']}, data {n['data']}, wake {n['wakes']} = {cur}{cost:.2f}"
+            + (f" of the {cur}10.00 monthly credit" if api == "vc" else ""))
+
+
+def show_costs_pager(term: "Term", c: "Colors") -> None:
+    """$: billed requests and their cost, period by period, newest first."""
+    got = load_usage()
+    eur = load_vc_config().get("region") == "eu"
+    lines = [f"  {c.B}{c.MAG}COSTS{c.R}  {c.GRY}$/q/Esc close  j/k/↓/↑ scroll{c.R}", ""]
+    for api, name in (("vc", "vc (Fleet API)"), ("mtm", "mtm (MyTeslaMate API)")):
+        periods = sorted((k for k in (got.get(api) or {}) if re.match(r"\d{4}-\d\d-\d\d$", k)), reverse=True)
+        day = int((got.get("days") or {}).get(api) or 1)
+        lines += ["", f"  {c.B}{c.MAG}{name}{c.R}  {c.GRY}periods from day {day} of the month "
+                      f"(tuisla --billing-day {api} DAY){c.R}"]
+        if not periods:
+            lines.append(f"  {c.GRY}(nothing counted yet){c.R}")
+        current = usage_period(api, usage=got).isoformat()
+        for k in periods:
+            start = _dt.date.fromisoformat(k)
+            col = c.YLW if k == current else c.GRY
+            lines.append(f"  {col}{start.strftime('%d %b %Y')}  {usage_text(api, got[api][k], eur)}{c.R}")
+    lines += ["", f"  {c.GRY}Counted: commands, data reads and wakes sent by tuisla to the Fleet API"
+                  f" or MyTeslaMate.{c.R}",
+              f"  {c.GRY}Not counted: the Owner API and Bluetooth (free), other requests, and what{c.R}",
+              f"  {c.GRY}the command proxy or other apps send: the bill can be higher.{c.R}", ""]
+    _pager_builtin(term, c, lines, title="Costs")
+
+
+def show_data_pager(term: "Term", c: "Colors", st: "State") -> None:
+    """!: the car's last data, and the last route answer, as JSON."""
+    width = max(20, term.get_size()[0] - 4)
+    lines = [f"  {c.B}{c.MAG}LAST DATA{c.R}  {c.GRY}!/q/Esc close  j/k/↓/↑ scroll  /search  n/N match{c.R}"]
+
+    def add(title: str, obj: Any) -> None:
+        lines.extend(["", f"  {c.B}{c.MAG}{title}{c.R}"])
+        for ln in json.dumps(obj, indent=2, ensure_ascii=False).splitlines():
+            pad = len(ln) - len(ln.lstrip())
+            for i, row in enumerate(textwrap.wrap(ln.strip(), max(10, width - pad - 2)) or [""]):
+                key, sep, rest = row.partition('": ')
+                if i == 0 and sep and key.startswith('"'):
+                    row = f"{c.CYN}{key}\"{c.R}: {rest}"
+                lines.append("  " + " " * (pad + (2 if i else 0)) + row)
+
+    at = _dt.datetime.fromtimestamp(st.data_at).strftime("%d %b %H:%M") if st.data_at else "?"
+    add(f"Vehicle data, {at}", st.last_data or {})
+    try:
+        with open(token_path(ROUTE_DUMP_FILE), encoding="utf-8") as f:
+            route = json.load(f)
+        at = _dt.datetime.fromtimestamp(os.path.getmtime(token_path(ROUTE_DUMP_FILE))).strftime("%d %b %H:%M")
+        add(f"Last route answer (Fleet API), {at}", route)
+    except (OSError, ValueError):
+        pass
+    lines.append("")
+    _pager_builtin(term, c, lines, title="Last data")
 
 
 def vc_file(name: str) -> str:
@@ -2596,6 +2652,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     frame.row2(c, kcap("-", "refresh -5s"), "", kcap("i", "invert"),   "")
     frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
     frame.row2(c, kcap("q", "quit"),        "", kcap("W", "keep awake"), "")
+    frame.row2(c, kcap("!", "last data"),   "", kcap("$", "costs"),    "")
 
     cmd_frame = Frame(content_w=content_w, lbl_w=lbl_w)
     cmd_frame.section(c, "COMMANDS")
@@ -2898,7 +2955,7 @@ def _pager_builtin(term: Term, c: Colors, all_lines: List[str], title: str = "",
         _, term_h = term.get_size()
         half = max(1, (term_h - 2) // 2)
 
-        if ch in ("q", "\x1b", "?", "z"):
+        if ch in ("q", "\x1b", "?", "z", "!", "$"):
             break
         elif picks and ch in ("\r", "\n"):
             chosen = picks[pick]
@@ -3269,6 +3326,14 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
     # z = log pager -- runs inline (blocks until user quits)
     if key == "z":
         show_log_pager(term, c)
+        return False
+
+    if key == "!":
+        show_data_pager(term, c, st)
+        return False
+
+    if key == "$":
+        show_costs_pager(term, c)
         return False
 
     if key == "i":

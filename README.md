@@ -38,7 +38,7 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car,
 
 ## Use
 
-`h` help · `?` all commands · `:` type a command · `w` wake the car · `W` keep it awake · `q` quit
+`h` help · `?` all commands · `:` type a command · `z` log · `!` last data (JSON) · `$` costs · `w` wake the car · `W` keep it awake · `q` quit
 
 ## Modes
 
