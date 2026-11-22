@@ -504,7 +504,8 @@ included, to the repository and push.)
             print(f"✓ The key is already on {vin}")
         else:
             link = f"https://tesla.com/_ak/{domain}?vin={vin}"
-            print(f"""Open this link ON YOUR PHONE (send it to yourself by mail or chat):
+            print(f"""Open this link on a phone where the official Tesla app is installed and
+authenticated (send it to yourself by mail or chat):
 
     {link}
 
