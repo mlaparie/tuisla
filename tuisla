@@ -1690,7 +1690,7 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
 
     label = best_key[0].upper() + best_key[1:]
     if best_ep.startswith("_"):
-        return run_info_cmd(term, c, client, st, best_ep)
+        return run_info_cmd(term, c, client, st, best_ep, label)
     return run_cmd(client, st, best_ep, label, body, c)
 
 
@@ -2333,8 +2333,11 @@ def route_summary(st: "State") -> str:
 
 
 def run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
-                 st: "State", ep: str) -> str:
+                 st: "State", ep: str, label: str = "") -> str:
     """Commands that only show something (chargers can also send one to the car)."""
+    if label:                           # until the answer comes, as run_cmd does
+        term.move(st.prompt_row, st.prompt_col)
+        term.write(f"\x1b[K{c.YLW}… {label}{c.R}")
     msg = _run_info_cmd(term, c, client, st, ep)
     old = position_age(st) if ep != "_mapscii_world" else ""
     if not old:
