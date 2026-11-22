@@ -1252,7 +1252,7 @@ def show_data_pager(term: "Term", c: "Colors", st: "State") -> None:
         with open(token_path(ROUTE_DUMP_FILE), encoding="utf-8") as f:
             route = json.load(f)
         at = _dt.datetime.fromtimestamp(os.path.getmtime(token_path(ROUTE_DUMP_FILE))).strftime("%d %b %H:%M")
-        add(f"Last route answer (Fleet API), {at}", route)
+        add(f"Last Fleet API data (read for the route), {at}", route)
     except (OSError, ValueError):
         pass
     lines.append("")
@@ -1832,7 +1832,7 @@ ROUTE_RETRIES = (15, 30)         # s between later tries, while it has none
 ROUTE_AUTO_GAP = 15 * 60         # s: no automatic route read (start, switch to vc) sooner than this after the last
 ROUTE_ENDPOINTS = ("charge_state;climate_state;closures_state;drive_state;gui_settings;"
                    "location_data;vehicle_config;vehicle_state")
-ROUTE_DUMP_FILE = "route_debug.json"
+ROUTE_DUMP_FILE = "last_fleet_data.json"   # the whole answer of the last route read (was route_debug.json)
 
 
 def route_keys(obj: Any, path: str = "") -> List[str]:
@@ -1877,6 +1877,8 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
         os.makedirs(os.path.dirname(dump), mode=0o700, exist_ok=True)
         with open(os.open(dump, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), "w") as f:
             json.dump(resp, f, indent=2, ensure_ascii=False)
+        if os.path.exists(token_path("route_debug.json")):
+            os.remove(token_path("route_debug.json"))
     except Exception:
         pass
     log_cmd("route", "route-like keys: " + (", ".join(route_keys(resp)) or "none")
