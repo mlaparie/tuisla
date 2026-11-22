@@ -241,7 +241,7 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("mapscii chargers",        "_mapscii_chargers",                None,                                       "Show the car and nearby chargers in the terminal (mapscii)"),
     ("mapscii country",         "_mapscii_country",                 None,                                       "Superchargers of the car's country, or another (mapscii country Spain)"),
     ("mapscii world",           "_mapscii_world",                   None,                                       "Every Supercharger in the world (supercharge.info), on a 3D globe"),
-    ("chargers",                "_chargers",                        None,                                       "Chargers within the car's range, or km (chargers 50); Enter sends one"),
+    ("chargers",                "_chargers",                        None,                                       "Chargers within the car's range or N km (straight-line, \"chargers 50\"); selecting one and pressing Enter sets it as destination"),
     ("route",                   "_route",                           None,                                       "Show the destination, arrival time and energy"),
 ]
 
@@ -2125,7 +2125,7 @@ def charger_infos(sites: Dict[str, Any], st: "State") -> List[str]:
             if loc.get("lat") is None or loc.get("long") is None:
                 continue
             d = float(site.get("distance_miles") or 0)
-            parts = [f"{d * 1.60934:.1f} km" if st.unit == "metric" else f"{d:.1f} mi"]
+            parts = [(f"{d * 1.60934:.1f} km" if st.unit == "metric" else f"{d:.1f} mi") + " straight-line"]
             if site.get("site_closed"):
                 parts.append("closed")
             elif site.get("available_stalls") is not None:
@@ -2815,7 +2815,7 @@ def show_chargers_pager(term: Term, c: Colors, st: "State",
         return f"{d * 1.60934 if st.unit == 'metric' else d:6.1f} {dist_u}"
 
     all_lines: List[str] = [
-        f"  {c.B}{c.MAG}CHARGERS WITHIN {range_text(st)}{c.R}  "
+        f"  {c.B}{c.MAG}CHARGERS WITHIN {range_text(st)} (STRAIGHT LINE){c.R}  "
         + (f"{c.YLW}{position_age(st)}{c.R}  " if position_age(st) else "")
         + f"{c.GRY}j/k/↓/↑ select  Enter send to car  q close{c.R}", ""]
     picked: Dict[int, Dict[str, Any]] = {}

@@ -125,7 +125,7 @@ mapscii                      Show the car on a map in the terminal (mapscii)
 mapscii chargers             Show the car and nearby chargers in the terminal (mapscii)
 mapscii country              Superchargers of the car's country, or another (mapscii country Spain)
 mapscii world                Every Supercharger in the world (supercharge.info), on a 3D globe
-chargers                     Chargers within the car's range, or km (chargers 50); Enter sends one
+chargers                     Chargers within the car's range or N km (straight-line, "chargers 50"); selecting one and pressing Enter sets it as destination
 route                        Show the destination, arrival time and energy
 ```
 
