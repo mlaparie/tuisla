@@ -149,6 +149,55 @@ def setup_vc() -> int:
             print(f"X {' '.join(cmd[:2])} failed: {out.stderr.strip()[:300]}")
         return out.returncode == 0
 
+    def push_pages(user: str, site: str) -> bool:
+        """Commit the site to the user's GitHub Pages repository and push it:
+        through gh when it is signed in (which also makes the repository and
+        turns Pages on), else over SSH.  False if it fails."""
+        repo = f"{user}/{user}.github.io"
+        gh = bool(shutil.which("gh")) and subprocess.run(
+            ["gh", "auth", "status"], capture_output=True).returncode == 0
+
+        def sh(cmd: List[str], quiet: bool = False) -> bool:
+            out = subprocess.run(tool(cmd) if cmd[0] == "git" else cmd, capture_output=True, text=True)
+            if out.returncode and not quiet:
+                print(f"X {' '.join(c for c in cmd if not c.startswith('credential'))[:60]} failed: "
+                      f"{out.stderr.strip()[:300]}")
+            return out.returncode == 0
+
+        if gh:
+            if not sh(["gh", "repo", "view", repo], quiet=True) and not sh(["gh", "repo", "create", repo, "--public"]):
+                return False
+            git, url = ["git", "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential"], \
+                f"https://github.com/{repo}.git"
+        else:
+            print(f"Open https://github.com/new and make a Public repository named exactly\n"
+                  f"    {user}.github.io")
+            pause()
+            git, url = ["git"], f"git@github.com:{repo}.git"
+        with tempfile.TemporaryDirectory() as tmp:
+            work = os.path.join(tmp, "site")
+            if not sh(git + ["clone", "-q", url, work]):
+                return False
+            shutil.copytree(site, work, dirs_exist_ok=True)
+            if not sh(["git", "-C", work, "rev-parse", "-q", "--verify", "HEAD"], quiet=True):
+                sh(["git", "-C", work, "symbolic-ref", "HEAD", "refs/heads/main"])     # empty repository
+            ident = [] if sh(["git", "-C", work, "config", "user.email"], quiet=True) else \
+                ["-c", f"user.name={user}", "-c", f"user.email={user}@users.noreply.github.com"]
+            if not (sh(["git", "-C", work, "add", "-A"])
+                    and (sh(["git", "-C", work, "diff", "--cached", "--quiet"], quiet=True)
+                         or sh(["git", "-C", work, *ident, "commit", "-q", "-m", "tuisla vc mode: public key"]))
+                    and sh(git + ["-C", work, "push", "-q", "origin", "HEAD"])):
+                return False
+            branch = subprocess.run(tool(["git", "-C", work, "branch", "--show-current"]),
+                                    capture_output=True, text=True).stdout.strip() or "main"
+        print(f"✓ Pushed to https://github.com/{repo}")
+        if not (gh and (sh(["gh", "api", f"repos/{repo}/pages"], quiet=True)
+                        or sh(["gh", "api", "-X", "POST", f"repos/{repo}/pages",
+                               "-f", f"source[branch]={branch}", "-f", "source[path]=/"]))):
+            print(f"Open https://github.com/{repo}/settings/pages; under \"Branch\" choose\n"
+                  f"\"{branch}\" and \"/ (root)\", Save.  Publishing takes a minute or two.")
+        return True
+
     print("This sets up vc mode: tuisla signs commands itself with Tesla's own\n"
           "vehicle-command proxy, instead of going through MyTeslaMate.  You need:\n"
           "  - a Tesla account with two-factor authentication turned on,\n"
@@ -256,21 +305,26 @@ def setup_vc() -> int:
         if not cfg.get("domain"):
             if yes("Do you want to use GitHub Pages? (say no if you have your own website)"):
                 user = ask("Your GitHub user name (sign up at https://github.com/signup first)")
-                print(f"""
+                if not (have("git") and yes("Push the files there with git? (needs gh signed in, "
+                                            "or your SSH key on GitHub)") and push_pages(user, site)):
+                    print(f"""
 1. Open https://github.com/new and make a repository named exactly
        {user}.github.io
    Leave it Public and tick "Add a README file", then "Create repository".
-2. Click "Add file" > "Create new file".  As the file name, type exactly
+2. Click "Add file" > "Create new file", name it  .nojekyll  and type  tuisla  as
+   the content (GitHub would otherwise skip folders starting with a dot).  Click
+   "Commit changes…" twice.
+3. Optional, for an easier sign-in later: "Add file" > "Upload files", and pick
+       {os.path.join(site, CALLBACK_PAGE)}
+   (Ctrl+L in the file picker lets you type that path).  Commit.
+4. Last, as it leaves you in a subfolder: "Add file" > "Create new file", and as
+   the file name type exactly
        {PUBKEY_PATH.lstrip('/')}
    (the slashes make the folders) and paste this as the content:
 
 {pub_pem}
 
-   Click "Commit changes…" twice.
-3. "Add file" > "Create new file" again, name it  .nojekyll  and type  tuisla  as
-   the content (GitHub would otherwise skip folders starting with a dot).  Commit.
-4. Optional, for an easier sign-in later: add one more file named {CALLBACK_PAGE}
-   with the content of {os.path.join(site, CALLBACK_PAGE)}.
+   Commit.
 5. Open Settings > Pages; under "Branch" choose "main" and "/ (root)", Save.
    Publishing takes a minute or two.
 
