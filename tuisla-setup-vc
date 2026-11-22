@@ -15,6 +15,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -361,12 +362,14 @@ included, to the repository and push.)
         if cfg.get("client_id") and not yes(f"Keep using the app with Client ID {cfg['client_id'][:8]}…?"):
             cfg.pop("client_id")
         if not cfg.get("client_id"):
+            login = re.sub(r"[^a-z0-9-]", "", getpass.getuser().lower()) or "me"
             print(f"""1. Open https://developer.tesla.com and sign in with your Tesla account.
 2. Choose "Create Application" (or "Request app access") and fill in:
-     Name:            tuisla-{domain.split('.')[0]}   (any name nobody else took)
+     For:             only me (personal use, not a business)
+     Name:            tuisla-{login}   (any name nobody else took)
      Description:     Personal terminal app to control my own car
      Purpose:         Personal use
-     Business details: your own name is fine for personal use
+     Business details: if still asked, your own name is fine
      OAuth grant type:      Authorization Code and Machine-to-Machine
      Allowed origin:        https://{domain}
      Allowed redirect URI:  {redirect}
