@@ -69,6 +69,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import textwrap
 import threading
 import time
 import urllib.parse
@@ -1198,7 +1199,7 @@ def usage_lines(c: "Colors") -> List[str]:
         cost  = sum(n[k] * USAGE_PRICES[api][k] for k in n)
         text  = (f"{name} since {start.strftime('%d %b')}: comm {n['commands']}, data {n['data']}, "
                  f"wake {n['wakes']} = {cur}{cost:.2f}" + (f" of the {cur}10.00 monthly credit" if api == "vc" else ""))
-        out.append(f"  {c.GRY}{text}{c.R}")
+        out.append(f"  {c.YLW}{text}{c.R}")
     return out
 
 
@@ -2942,18 +2943,30 @@ def show_log_pager(term: Term, c: Colors) -> None:
     if not entries:
         all_lines.append(f"  {c.GRY}(log is empty){c.R}")
     else:
-        width = max(20, term.get_size()[0] - 4)   # wrapped here: a row the terminal wraps throws the pager off
+        # Each entry: its time and mode on one line, then the command (as in ?)
+        # and its result, indented and wrapped here (a row the terminal wraps
+        # throws the pager off).
+        width = max(20, term.get_size()[0] - 6)
         for entry in entries:
-            if " - ok" in entry or "✓" in entry:
+            m = re.match(r"(\S+ \S+) - (?:\[(\w+)\] )?(\S+) - (.*)", entry)
+            when, mode, ep, result = m.groups() if m else ("", None, "", entry)
+            if result.startswith("✓") or " - ok" in entry:
                 color = c.GRN
-            elif any(x in entry for x in (" - X ", "Unknown", "missing", "disabled", "failed")):
+            elif result.startswith("X ") or any(x in result for x in ("Unknown", "missing", "disabled", "failed")):
                 color = c.RED
             else:
                 color = c.GRY
-            rows = [entry[i:i + width] for i in range(0, len(entry), width)]
+            text = f"{ep}  {result}" if ep else result
+            rows = textwrap.wrap(text, width) or [""]
             if len(rows) > LOG_ROWS:
                 rows = rows[:LOG_ROWS - 1] + [rows[LOG_ROWS - 1][:width - 1] + "…"]
-            all_lines += [f"  {color}{r}{c.R}" for r in rows]
+            if when:
+                all_lines.append(f"  {c.GRY}{when}{c.R}" + (f"  {c.MAG}{mode}{c.R}" if mode else ""))
+            first = rows[0]
+            if ep and first.startswith(ep):
+                first = f"{c.CYN}{ep}{c.R}{color}{first[len(ep):]}"
+            all_lines.append(f"    {color}{first}{c.R}")
+            all_lines += [f"    {color}{r}{c.R}" for r in rows[1:]]
 
     all_lines.append("")
     _pager_builtin(term, c, all_lines, title=f"Command log  {len(entries)} entries")
