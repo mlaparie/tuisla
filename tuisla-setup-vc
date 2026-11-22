@@ -37,8 +37,8 @@ _loader.exec_module(tuisla)
 
 from tuisla import (AUTHORIZE_URL, FLEET_REGIONS, FLEET_TOKEN_FILE, FLEET_TOKEN_URL,  # noqa: E402
                     VC_CONFIG, TeslaClient, VcBackend, _b64url, api_error, auth_post,
-                    find_go_tool, find_proxy, fleet_client, jget, load_token, load_vc_config,
-                    parse_callback, save_token, token_path, vc_file)
+                    find_go_tool, find_proxy, fleet_client, jget, load_token, load_usage,
+                    load_vc_config, parse_callback, save_token, set_billing_day, token_path, vc_file)
 
 FLEET_SCOPES     = "openid offline_access vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds"
 PUBKEY_PATH      = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
@@ -204,8 +204,9 @@ def setup_vc() -> int:
           "  - a Tesla account with two-factor authentication turned on,\n"
           "  - a free GitHub account (or any website of yours) to publish one file,\n"
           "  - your phone with the Tesla app, near the car, for the last steps,\n"
-          "  - a payment card: Tesla bills the Fleet API, but gives $10 of use every\n"
-          "    month, which covers a personal car (about 1000 commands = $1).\n"
+          "  - a payment card: Tesla bills the Fleet API, but gives a monthly credit\n"
+          "    ($10 in the US, €10 in Europe), which covers a personal car (about\n"
+          "    1000 commands = $1).\n"
           "It takes about 20 minutes.  You can stop at any time (Ctrl-C) and run\n"
           "tuisla --setup-vc again later: finished steps are remembered.")
     try:
@@ -375,7 +376,7 @@ included, to the repository and push.)
      Allowed redirect URI:  {redirect}
      Scopes:  Vehicle Information, Vehicle Location, Vehicle Commands,
               Vehicle Charging Management
-3. Under billing, add a payment method (the $10 monthly credit is applied first).
+3. Under billing, add a payment method (the monthly credit is applied first).
 4. Once created, open the app's "Credentials & APIs" page.
 """)
             try:
@@ -383,6 +384,10 @@ included, to the repository and push.)
             except Exception:
                 pass
             cfg["client_id"] = ask("Client ID")
+            if "vc" not in (load_usage().get("days") or {}):      # the counts in z
+                set_billing_day("vc", time.localtime().tm_mday)
+                print(f"Billing period from day {min(28, time.localtime().tm_mday)} of each month; if this\n"
+                      "developer account was billed before, set its day: tuisla --billing-day vc DAY")
             get_secret()
             cfg.pop("registered", None)
         tz = os.environ.get("TZ") or os.path.realpath("/etc/localtime")

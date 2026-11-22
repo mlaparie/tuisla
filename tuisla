@@ -859,10 +859,10 @@ def login(print_token: bool = False, then_mtm: bool = True) -> int:
         "other later):\n"
         "  1. MyTeslaMate API: easy, sign in there and paste a token here; pay as you\n"
         "     go, about 1 EUR for 500 commands a month.\n"
-        "  2. vehicle-command (vc mode): free for a personal car (Tesla's monthly $10\n"
-        "     credit covers it), but about 20 minutes to set up once: your own key,\n"
-        "     a free GitHub Pages site and a Tesla developer account with a payment\n"
-        "     card.  Also works over Bluetooth when there is no network.\n"
+        "  2. vehicle-command (vc mode): free for a personal car (a monthly credit from\n"
+        "     Tesla, $10 or €10, covers it), but about 20 minutes to set up once:\n"
+        "     your own key, a free GitHub Pages site and a Tesla developer account\n"
+        "     with a payment card.  Also works over Bluetooth when there is no network.\n"
         "  3. Neither for now: read-only.")
     try:
         choice = input("Your choice [1]: ").strip() or "1"
@@ -1040,6 +1040,7 @@ class TeslaClient:
             headers["Authorization"] = f"Bearer {bearer}"
         payload = json.dumps(body).encode("utf-8") if body else (b"" if method == "POST" else None)
         req = urllib.request.Request(url, method=method, data=payload, headers=headers)
+        count_usage(url)
         return self._http(req, ctx=ctx)
 
     def api_get(self, path: str) -> Dict[str, Any]:
@@ -1129,6 +1130,76 @@ FLEET_TOKEN_URL  = "https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token"
 FLEET_REGIONS    = {"na": "https://fleet-api.prd.na.vn.cloud.tesla.com",
                     "eu": "https://fleet-api.prd.eu.vn.cloud.tesla.com"}
 FLEET_MIN_REFRESH = 60     # s; Fleet API data costs money (500 requests/$1)
+
+# Billed requests (MyTeslaMate's and the Fleet API's), counted per billing
+# period in USAGE_FILE and shown by z.  The Owner API and Bluetooth are free.
+USAGE_FILE   = "usage.json"
+USAGE_PRICES = {"vc":  {"commands": 0.001, "data": 0.002, "wakes": 0.02},    # $ or € on the Fleet API
+                "mtm": {"commands": 0.002, "data": 0.004, "wakes": 0.04}}    # €: 500 credits/€
+_usage_lock  = threading.Lock()
+
+
+def load_usage() -> Dict[str, Any]:
+    try:
+        got = json.loads(load_token(USAGE_FILE) or "{}")
+    except ValueError:
+        got = {}
+    return got if isinstance(got, dict) else {}
+
+
+def set_billing_day(api: str, day: int) -> None:
+    """The day of the month api's billing period starts (tuisla --billing-day)."""
+    with _usage_lock:
+        got = load_usage()
+        got.setdefault("days", {})[api] = max(1, min(28, int(day)))
+        save_token(json.dumps(got), USAGE_FILE)
+
+
+def usage_period(api: str, today: Optional[_dt.date] = None,
+                 usage: Optional[Dict[str, Any]] = None) -> _dt.date:
+    """Start of api's current billing period: monthly from its billing day, else the 1st."""
+    today = today or _dt.date.today()
+    day   = int(((usage if usage is not None else load_usage()).get("days") or {}).get(api) or 1)
+    if today.day >= day:
+        return today.replace(day=day)
+    return (today.replace(day=1) - _dt.timedelta(days=1)).replace(day=day)
+
+
+def count_usage(url: str) -> None:
+    api = ("mtm" if url.startswith(MTM_API) else
+           "vc" if url.startswith(tuple(FLEET_REGIONS.values())) or url.startswith(tuple(VC_PROXIES)) else "")
+    kind = ("wakes" if "/wake_up" in url else "commands" if "/command/" in url
+            else "data" if "/vehicle_data" in url else "")
+    if not (api and kind):
+        return
+    with _usage_lock:
+        got = load_usage()
+        per = got.setdefault(api, {}).setdefault(usage_period(api, usage=got).isoformat(), {})
+        per[kind] = per.get(kind, 0) + 1
+        try:
+            save_token(json.dumps(got), USAGE_FILE)
+        except OSError:
+            pass
+
+
+def usage_lines(c: "Colors") -> List[str]:
+    """This period's billed requests and their cost, for the log pager."""
+    got, out = load_usage(), []
+    eur = load_vc_config().get("region") == "eu"      # the Fleet API bills in € in Europe
+    ready = {"vc": bool(load_vc_config().get("client_id")),
+             "mtm": bool(os.environ.get("MYTESLAMATE_TOKEN") or load_token(MTM_TOKEN_FILE))}
+    for api, name in (("vc", "vc (Fleet API)"), ("mtm", "mtm (MyTeslaMate API)")):
+        if api not in got and not ready[api]:      # neither used nor set up
+            continue
+        start = usage_period(api, usage=got)
+        per   = (got.get(api) or {}).get(start.isoformat()) or {}
+        n     = {k: int(per.get(k) or 0) for k in ("commands", "data", "wakes")}
+        cur   = "€" if api == "mtm" or eur else "$"
+        cost  = sum(n[k] * USAGE_PRICES[api][k] for k in n)
+        text  = (f"{name} since {start.strftime('%d %b')}: comm {n['commands']}, data {n['data']}, "
+                 f"wake {n['wakes']} = {cur}{cost:.2f}" + (f" of the {cur}10.00 monthly credit" if api == "vc" else ""))
+        out.append(f"  {c.GRY}{text}{c.R}")
+    return out
 
 
 def vc_file(name: str) -> str:
@@ -1226,6 +1297,9 @@ def fleet_client(cfg: Dict[str, Any], refresh_token: str) -> TeslaClient:
                        cache="fleet_access_token")
 
 
+VC_PROXIES: set = set()      # tesla-http-proxy URLs: what goes there is billed as vc
+
+
 class VcBackend:
     """Sends vc-mode commands through tesla-http-proxy: one the user runs
     (VEHICLE_COMMAND_URL), or else one tuisla starts with the --setup-vc keys
@@ -1236,6 +1310,8 @@ class VcBackend:
         self.external = bool(url)
         self.url      = url.rstrip("/")
         self.cafile   = cafile
+        if self.url:
+            VC_PROXIES.add(self.url)
         self.proc: Optional[subprocess.Popen] = None
 
     def context(self) -> ssl.SSLContext:
@@ -1718,11 +1794,14 @@ def route_keys(obj: Any, path: str = "") -> List[str]:
 
 def fetch_route(client: TeslaClient, st: "State") -> None:
     """The Owner API data has no route (active_route_*), so ask the Fleet API
-    for it: through MyTeslaMate in mtm mode, through our own app in vc mode."""
+    for it: through our own app when vc mode is set up (MyTeslaMate's data has
+    no route), else through MyTeslaMate in mtm mode."""
     path = (f"/vehicles/{urllib.parse.quote(st.target_vin)}/vehicle_data?endpoints="
             + urllib.parse.quote(ROUTE_ENDPOINTS))
     try:
-        if st.mode == "mtm" and st.myteslamate_token:
+        if st.vc is not None:
+            resp = st.vc.client.api_get(path)
+        elif st.mode == "mtm" and st.myteslamate_token:
             try:
                 resp = client._request("GET", MTM_API + path, None, None, st.myteslamate_token)
             except RuntimeError as e:
@@ -1730,8 +1809,6 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
                     raise
                 resp = client._request("GET", f"{MTM_API}{path}&token="
                                        + urllib.parse.quote(st.myteslamate_token), None, None, "")
-        elif st.mode == "vc" and st.vc is not None:
-            resp = st.vc.client.api_get(path)
         else:
             return
     except Exception as e:
@@ -2462,6 +2539,7 @@ class State:
     data_at: float = 0.0         # when last_data was fetched
     route_until: float = 0.0     # ask for the location (and route) until then
     route: Dict[str, Any] = dataclasses.field(default_factory=dict)  # active_route_* from fetch_route
+    mode_at: float = 0.0         # when the mode was last switched
     watch_until: float = 0.0     # fetch data until then even if the car may sleep (after a command)
     status: str = ""             # shown on the message line while nothing else is
     jobs: Any = None             # queue of commands sent in the background (live mode)
@@ -2857,6 +2935,7 @@ def show_log_pager(term: Term, c: Colors) -> None:
     all_lines: List[str] = [
         f"  {c.B}{c.MAG}COMMAND LOG{c.R}  "
         f"{c.GRY}newest first  z/q/Esc close  j/k/↓/↑ scroll  d/u/PgDn/PgUp half-page  g/G top/bottom{c.R}",
+        *usage_lines(c),
         "",
     ]
 
@@ -3171,6 +3250,17 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
     if key in ("m", "M"):
         st.mode = {"ro": "mtm", "mtm": "vc", "vc": "ro"}.get(st.mode, "ro")
         LOG_MODE["mode"] = st.mode if client else "demo"
+        st.mode_at = stamp = time.time()
+        if st.mode == "vc" and client is not None and st.vc is not None:
+            # The route, once vc mode stays on for 2 s (a quick switch past it asks nothing).
+            def route() -> None:
+                if st.mode == "vc" and st.mode_at == stamp:
+                    fetch_route(client, st)
+                    if st.redraw:
+                        st.redraw()
+            t = threading.Timer(2, route)
+            t.daemon = True
+            t.start()
         return False
 
     if key == "u":
@@ -3242,6 +3332,9 @@ def main() -> int:
                     help="Save a MyTeslaMate API token (from their API tab), then exit")
     ap.add_argument("--print",         action="store_true",
                     help="With --login-tesla: print the Tesla token instead of saving it")
+    ap.add_argument("--billing-day",   nargs=2, metavar=("MODE", "DAY"),
+                    help="Day of the month the billing period of MODE (vc or mtm) starts, for "
+                         "the counts in z (e.g. --billing-day vc 22), then exit")
     ap.add_argument("--setup-vc",      action="store_true",
                     help="Step-by-step setup of vc mode (own key and Tesla developer app)")
     args = ap.parse_args()
@@ -3250,6 +3343,13 @@ def main() -> int:
         return login(print_token=args.print, then_mtm=args.login and not args.print)
     if args.login_mtm:
         return login_mtm()
+    if args.billing_day:
+        mode, day = args.billing_day
+        if mode not in ("vc", "mtm") or not day.isdigit() or not 1 <= int(day) <= 31:
+            die("usage: tuisla --billing-day vc|mtm DAY (1 to 31)")
+        set_billing_day(mode, int(day))
+        print(f"{mode}: billing period from day {min(28, int(day))} of each month")
+        return 0
     if args.setup_vc:
         setup_vc()
 
@@ -3482,6 +3582,8 @@ def main() -> int:
                 dirty.set()
 
         threading.Thread(target=fetch_loop, daemon=True).start()
+        if st.mode == "vc" and st.vc is not None:      # the route, once at start
+            threading.Thread(target=lambda: (fetch_route(client, st), st.redraw()), daemon=True).start()
         threading.Thread(target=run_jobs, daemon=True).start()
 
         size = term.get_size()
