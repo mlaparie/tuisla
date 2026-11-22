@@ -2647,12 +2647,12 @@ def render_help(term: Term, c: Colors, st: State) -> None:
         return f"{c.REV} {k:<1} {c.R} {desc}"
 
     frame.section(c, "TUISLA")
-    frame.row2(c, kcap("m", "mode"),        "", kcap("u", "units"),    "")
-    frame.row2(c, kcap("r", "refresh"),     "", kcap("s", "style"),    "")
-    frame.row2(c, kcap("-", "refresh -5s"), "", kcap("i", "invert"),   "")
-    frame.row2(c, kcap("+", "refresh +5s"), "", kcap("b", "bw/color"), "")
-    frame.row2(c, kcap("q", "quit"),        "", kcap("W", "keep awake"), "")
-    frame.row2(c, kcap("!", "last data"),   "", kcap("$", "costs"),    "")
+    frame.row2(c, kcap("m", "mode"),          "", kcap("!", "last data"), "")
+    frame.row2(c, kcap("r", "force refresh"), "", kcap("$", "costs"),     "")
+    frame.row2(c, kcap("-", "refresh -5s"),   "", kcap("s", "style"),     "")
+    frame.row2(c, kcap("+", "refresh +5s"),   "", kcap("b", "bw/color"),  "")
+    frame.row2(c, kcap("W", "keep awake"),    "", kcap("i", "invert"),    "")
+    frame.row2(c, kcap("u", "units"),         "", kcap("q", "quit"),      "")
 
     cmd_frame = Frame(content_w=content_w, lbl_w=lbl_w)
     cmd_frame.section(c, "COMMANDS")
