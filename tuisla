@@ -1773,6 +1773,7 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
 
 ROUTE_DELAY = 8                  # s for the car to compute a route sent to it
 ROUTE_RETRIES = (15, 30)         # s between later tries, while it has none
+ROUTE_AUTO_GAP = 15 * 60         # s: no automatic route read (start, switch to vc) sooner than this after the last
 ROUTE_ENDPOINTS = ("charge_state;climate_state;closures_state;drive_state;gui_settings;"
                    "location_data;vehicle_config;vehicle_state")
 ROUTE_DUMP_FILE = "route_debug.json"
@@ -1844,6 +1845,27 @@ def fetch_route(client: TeslaClient, st: "State") -> None:
         save_token(json.dumps(st.route), LAST_ROUTE_FILE)
     except OSError:
         pass
+
+
+def auto_route(client: TeslaClient, st: "State", why: str) -> None:
+    """The route read at start or on switching to vc mode, unless such an
+    automatic read was made less than ROUTE_AUTO_GAP ago (restarts and mode
+    switches in a row): each costs.  :route and navigation commands still ask."""
+    with _usage_lock:
+        got = load_usage()
+        ago = time.time() - float(got.get("auto_route_at") or 0)
+        if ago >= ROUTE_AUTO_GAP:
+            got["auto_route_at"] = time.time()
+            try:
+                save_token(json.dumps(got), USAGE_FILE)
+            except OSError:
+                pass
+    if ago < ROUTE_AUTO_GAP:
+        log_cmd("route", f"not asked {why}: asked automatically {int(ago // 60)} min ago (:route asks anyway)")
+        return
+    fetch_route(client, st)
+    if st.redraw:
+        st.redraw()
 
 
 def route_fields(st: "State", data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
@@ -3268,9 +3290,7 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
             # The route, once vc mode stays on for 2 s (a quick switch past it asks nothing).
             def route() -> None:
                 if st.mode == "vc" and st.mode_at == stamp:
-                    fetch_route(client, st)
-                    if st.redraw:
-                        st.redraw()
+                    auto_route(client, st, "on switching to vc")
             t = threading.Timer(2, route)
             t.daemon = True
             t.start()
@@ -3596,7 +3616,7 @@ def main() -> int:
 
         threading.Thread(target=fetch_loop, daemon=True).start()
         if st.mode == "vc" and st.vc is not None:      # the route, once at start
-            threading.Thread(target=lambda: (fetch_route(client, st), st.redraw()), daemon=True).start()
+            threading.Thread(target=auto_route, args=(client, st, "at start"), daemon=True).start()
         threading.Thread(target=run_jobs, daemon=True).start()
 
         size = term.get_size()
