@@ -1359,12 +1359,15 @@ def run_cmd(client: Optional[TeslaClient], st: "State", ep: str, label: str,
     def job() -> None:
         st.cmd_msg, st.cmd_msg_at = send_cmd(client, st, ep, label, body, c), 0.0
         if ep.startswith("navigation_") and "✓" in st.cmd_msg:
-            # The Owner API data has no route: ask for it once, when the car has it.
-            def route() -> None:
+            # The Owner API data has no route: ask for it when the car has it,
+            # a few times at most, as computing it can take the car a while.
+            def route(tries: List[int]) -> None:
                 fetch_route(client, st)
                 if st.redraw:
                     st.redraw()
-            threading.Timer(ROUTE_DELAY, route).start()
+                if not st.route and tries:
+                    threading.Timer(tries[0], route, (tries[1:],)).start()
+            threading.Timer(ROUTE_DELAY, route, (list(ROUTE_RETRIES),)).start()
     st.pending += 1
     st.jobs.put(job)
     return f"h help    {c.YLW}… {label}{c.R}"
@@ -1691,6 +1694,7 @@ def parse_and_run_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
 
 
 ROUTE_DELAY = 8                  # s for the car to compute a route sent to it
+ROUTE_RETRIES = (15, 30)         # s between later tries, while it has none
 ROUTE_ENDPOINTS = ("charge_state;climate_state;closures_state;drive_state;gui_settings;"
                    "location_data;vehicle_config;vehicle_state")
 ROUTE_DUMP_FILE = "route_debug.json"
