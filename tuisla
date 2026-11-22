@@ -1094,9 +1094,13 @@ def log_file() -> str:
     return token_path("tuisla.log")
 
 
+LOG_MODE = {"mode": ""}         # the current mode, written in each log entry
+
+
 def log_cmd(ep: str, result: str) -> None:
     ts    = _dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    entry = f"{ts} - {ep} - {strip_ansi(result)}\n"
+    mode  = f"[{LOG_MODE['mode']}] " if LOG_MODE["mode"] else ""
+    entry = f"{ts} - {mode}{ep} - {strip_ansi(result)}\n"
     try:
         os.makedirs(os.path.dirname(log_file()), mode=0o700, exist_ok=True)
         with open(log_file(), "a", encoding="utf-8") as f:
@@ -1281,18 +1285,23 @@ class VcBackend:
             self.proc = None
 
     def command(self, vin: str, ep: str, body: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-        self.start()
-        url = f"{self.url}/api/1/vehicles/{vin}/command/{ep}"
+        # The proxy only signs commands it knows; these need no signature and
+        # go to the Fleet API as they are (it answers invalid_command to them).
+        if ep in ("navigation_gps_request", "navigation_sc_request"):
+            url, ctx = f"{self.client.api_base}/vehicles/{vin}/command/{ep}", None
+        else:
+            self.start()
+            url, ctx = f"{self.url}/api/1/vehicles/{vin}/command/{ep}", self.context()
         if not (self.client.access_token or self.client.use_cached_token()):
             self.client.refresh_access_token()
         try:
-            return self.client.api_post(url, body, ctx=self.context())
+            return self.client.api_post(url, body, ctx=ctx)
         except RuntimeError as e:
             if not str(e).startswith(("HTTP 401", "HTTP 403")):
                 raise
             # The access token expired since it was last used; renew once.
             self.client.refresh_access_token()
-            return self.client.api_post(url, body, ctx=self.context())
+            return self.client.api_post(url, body, ctx=ctx)
 
 
 # =============================================================================
@@ -3108,6 +3117,7 @@ def handle_key(term: Term, c: Colors, st: State, client: Optional[TeslaClient],
 
     if key in ("m", "M"):
         st.mode = {"ro": "mtm", "mtm": "vc", "vc": "ro"}.get(st.mode, "ro")
+        LOG_MODE["mode"] = st.mode if client else "demo"
         return False
 
     if key == "u":
@@ -3240,6 +3250,7 @@ def main() -> int:
     err = ""
     try:
         # DEMO MODE
+        LOG_MODE["mode"] = st.mode if refresh_token or st.vc else "demo"
         if not refresh_token and st.vc is None:
             while True:
                 if st.show_help:
