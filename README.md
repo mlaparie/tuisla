@@ -17,7 +17,7 @@ on the right only (demo data, read-only mode).*
 - Python 3 and `curl`.
 - On Linux, `xdg-utils`, so that `--login` can catch the Tesla sign-in link by itself and `map` opens your browser. Without it, you have to copy the sign-in link from the browser by hand, and open maps yourself.
 - Optionally, a font with the icons of the fancy style (⌁ ❄ ◎ ⊡ ⌖), such as Iosevka; DejaVu Sans Mono lacks ⌖, which most terminals then take from another font.
-- A Tesla account. Reading the car's information works out of the box and needs no extra API, except the current route (destination, arrival time and energy), which only Tesla's newer API gives: through MyTeslaMate or vc mode.
+- A Tesla account. Reading the car's information works out of the box and needs no extra API, except the current route (destination, arrival time and energy), which needs vc mode: MyTeslaMate's copy of the car's data holds no valid route or position.
 - To send commands to the car, one of:
   - a [MyTeslaMate API](https://www.myteslamate.com/api/) token: a pay-as-you-go thingie, about 1 € for 500 commands per month. You *do not* need a "MyTeslaMate instance" subscription, just the API.
   - vc mode (see [Modes](#modes)): no paid API, but more involved to set up.
@@ -126,7 +126,7 @@ mapscii chargers             Show the car and nearby chargers in the terminal (m
 mapscii country              Superchargers of the car's country, or another (mapscii country Spain)
 mapscii world                Every Supercharger in the world (supercharge.info), on a 3D globe
 chargers                     Chargers within the car's range or N km (straight-line, "chargers 50"); selecting one and pressing Enter sets it as destination
-route                        Show the destination, arrival time and energy
+route                        Show the destination, arrival time and energy (vc mode)
 ```
 
 ## Chargers on a map

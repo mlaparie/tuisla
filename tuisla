@@ -242,7 +242,7 @@ CMD_REGISTRY: List[Tuple[str, str, Optional[Dict[str, Any]], str]] = [
     ("mapscii country",         "_mapscii_country",                 None,                                       "Superchargers of the car's country, or another (mapscii country Spain)"),
     ("mapscii world",           "_mapscii_world",                   None,                                       "Every Supercharger in the world (supercharge.info), on a 3D globe"),
     ("chargers",                "_chargers",                        None,                                       "Chargers within the car's range or N km (straight-line, \"chargers 50\"); selecting one and pressing Enter sets it as destination"),
-    ("route",                   "_route",                           None,                                       "Show the destination, arrival time and energy"),
+    ("route",                   "_route",                           None,                                       "Show the destination, arrival time and energy (vc mode)"),
 ]
 
 # Build keyword->(endpoint, body_template, help, placeholder names) lookup.
