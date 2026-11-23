@@ -127,8 +127,21 @@ def setup_vc() -> int:
     def pause(msg: str = "Press Enter when done") -> None:
         input(f"{msg}… ")
 
+    dev_opened = False           # developer.tesla.com already opened in the browser
+
+    def open_dev() -> None:
+        nonlocal dev_opened
+        if not dev_opened:
+            dev_opened = True
+            try:
+                webbrowser.open("https://developer.tesla.com")
+            except Exception:
+                pass
+
     def get_secret() -> str:
         nonlocal secret
+        if not secret:
+            open_dev()
         while not secret:
             secret = getpass.getpass(f"Client Secret of {cfg['client_id'][:8]}… (hidden; developer.tesla.com, "
                                      "your app's \"Credentials & APIs\" page): ").strip()
@@ -411,10 +424,7 @@ included, to the repository and push.)
 3. Under billing, add a payment method (the monthly credit is applied first).
 4. Once created, open the app's "Credentials & APIs" page.
 """)
-            try:
-                webbrowser.open("https://developer.tesla.com")
-            except Exception:
-                pass
+            open_dev()
             cfg["client_id"] = ask("Client ID")
             if "vc" not in (load_usage().get("days") or {}):      # the counts in z
                 set_billing_day("vc", time.localtime().tm_mday)
