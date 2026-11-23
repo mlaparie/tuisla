@@ -3295,9 +3295,9 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
         if vlen(charge) > fit:
             charge = f"{c.YLW}{kwh}, end {fmt_time_hhmm(chg_mins)}{c.R}"
     elif chg_state == "complete":
-        charge = f"{c.GRN}completed {kwh}{c.R}"
+        charge = f"{c.GRN}completed, {kwh}{c.R}"
     elif plugged:
-        charge = f"{c.R}{chg_state if chg_state == 'starting' else 'off'} {kwh}{c.R}"
+        charge = f"{c.R}{chg_state if chg_state == 'starting' else 'off'}, {kwh}{c.R}"
     else:
         charge = f"{c.GRY}disconnected{c.R}"
 
@@ -3311,20 +3311,21 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     else:
         sched = f"{c.GRY}off{c.R}"
 
-    # COP and Precond: off when turned off, else whether it runs now and its setting.
-    def setting(enabled: bool, running: bool, what: str) -> str:
+    # COP and the preheating Sched: off when turned off, else whether it runs
+    # now and its setting (a COP that is set but idle stays grey).
+    def setting(enabled: bool, running: bool, what: str, idle: str = "") -> str:
         if not enabled:
             return f"{c.GRY}off{c.R}"
-        return f"{c.GRN}on ({what}){c.R}" if running else f"{c.R}off ({what}){c.R}"
+        return f"{c.GRN}on, {what}{c.R}" if running else f"{idle or c.R}off, {what}{c.R}"
 
     cop_mode = str(cl.get("cabin_overheat_protection") or "Off")
     cop_temp = str(cl.get("cop_activation_temperature") or "").lower()
     cop = setting(cop_mode != "Off", bool(cl.get("cabin_overheat_protection_actively_cooling")),
-                  ("fan" if cop_mode == "FanOnly" else "A/C") + (f" {cop_temp}" if cop_temp else ""))
+                  ("fan" if cop_mode == "FanOnly" else "A/C") + (f" {cop_temp}" if cop_temp else ""), c.GRY)
     precond = setting(bool(cs.get("preconditioning_enabled")), bool(cl.get("is_preconditioning")),
                       f"{clock(cs.get('scheduled_departure_time'))} {days(cs.get('preconditioning_times'))}".strip())
 
-    climate = f"{clm_c}{clm_l} {set_temp}{temp_u}{c.R}"
+    climate = f"{clm_c}{clm_l}, {set_temp}{temp_u}{c.R}"
     power = f"{c.YLW}{chg_kw} kW ({chg_volts} V, {chg_current} A){c.R}"
 
     # Both columns always have as many rows; Power and B. heat only while plugged in.
@@ -3333,7 +3334,7 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
            [("Limit", f"{chg_limit}%"), ("Sched", sched)]
     right = [("Outside", f"{outside}{temp_u}"), ("Inside", f"{inside}{temp_u}"), ("Climate", climate)] + \
             ([("B. heat", f"{bat_c}{bat_l}{c.R}")] if plugged else []) + \
-            [("Defrost", f"{def_c}{def_l}{c.R}"), ("COP", cop), ("Precond", precond)]
+            [("Defrost", f"{def_c}{def_l}{c.R}"), ("COP", cop), ("Sched", precond)]
     for (ll, vl), (lr, vr) in zip(left, right):
         frame.row2(c, ll, vl, lr, vr)
 
