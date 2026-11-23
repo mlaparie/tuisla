@@ -2716,12 +2716,13 @@ def render_help(term: Term, c: Colors, st: State) -> None:
         return f"{c.REV} {k:<1} {c.R} {desc}"
 
     frame.section(c, "TUISLA")
-    frame.row2(c, kcap("m", "mode"),          "", kcap("!", "last data"), "")
-    frame.row2(c, kcap("r", "force refresh"), "", kcap("$", "costs"),     "")
-    frame.row2(c, kcap("-", "refresh -5s"),   "", kcap("s", "style"),     "")
-    frame.row2(c, kcap("+", "refresh +5s"),   "", kcap("b", "bw/color"),  "")
-    frame.row2(c, kcap("W", "keep awake"),    "", kcap("i", "invert"),    "")
-    frame.row2(c, kcap("u", "units"),         "", kcap("q", "quit"),      "")
+    frame.row2(c, kcap("m", "mode"),          "", kcap("u", "units"),     "")
+    frame.row2(c, kcap("r", "force refresh"), "", kcap("s", "style"),     "")
+    frame.row2(c, kcap("-", "refresh -5s"),   "", kcap("b", "bw/color"),  "")
+    frame.row2(c, kcap("+", "refresh +5s"),   "", kcap("i", "invert"),    "")
+    frame.row1(c, kcap("!", "last data"),     "")
+    frame.row1(c, kcap("$", "costs"),         "")
+    frame.row1(c, kcap("q", "quit"),          "")
 
     cmd_frame = Frame(content_w=content_w, lbl_w=lbl_w)
     cmd_frame.section(c, "COMMANDS")
@@ -2730,7 +2731,8 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     cmd_frame.row2(c, kcap("l", "lock"),        "", kcap("p", "charge start"), "")
     cmd_frame.row2(c, kcap("C", "climate on"),  "", kcap("P", "charge stop"),  "")
     cmd_frame.row2(c, kcap("c", "climate off"), "", kcap("w", "wake"),         "")
-    cmd_frame.row2(c, kcap(":", "enter command"), "", kcap("?", "all commands"), "")
+    cmd_frame.row2(c, kcap(":", "enter command"), "", kcap("W", "keep awake"), "")
+    cmd_frame.row1(c, kcap("?", "all commands"), "")
     cmd_frame.row1(c, kcap("z", "show log"), "")
 
     frame.maxvis = max(frame.maxvis, cmd_frame.maxvis)
