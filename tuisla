@@ -2632,6 +2632,9 @@ def _run_info_cmd(term: Term, c: Colors, client: Optional[TeslaClient],
         if client is None:
             demo_route(site)
         name, loc = str(site.get("name", "?")), site.get("location") or {}
+        # Temporary: what Tesla sends for a site (an id for navigation_sc_request?)
+        log_cmd("chargers", f"{name}: " + ", ".join(
+            f"{k}={v}" for k, v in sorted(site.items()) if k not in ("name", "location")))
         if loc.get("lat") is not None and loc.get("long") is not None:
             return run_cmd(client, st, "navigation_gps_request", f"Navigating to {name}",
                            {"lat": loc["lat"], "lon": loc["long"], "order": 1}, c)
