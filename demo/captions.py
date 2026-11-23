@@ -5,7 +5,7 @@ a step number, "key NAME", or "end"."""
 import collections, os, signal, sys, textwrap
 
 STEPS = [
-    ("Dashboard",           "",      "Battery, charging, climate, tyres, locks and the current route at a glance. Refreshes every 5 s."),
+    ("Dashboard",           "",      "Battery, charging and its schedule, climate, preheating, tyres, locks, windows and the route at a glance."),
     ("Help",                "h",     "Keys and current settings. Toggles take effect right away:"),
     ("  Refresh rate",      "+ -",   "Refresh interval in 5 s steps, shown in help."),
     ("  Colors",            "b",     "On by default; -b starts without. Seen on the dashboard."),
@@ -16,7 +16,9 @@ STEPS = [
     ("Search",              "/",     "Regex search in the list; n/N jump between matches."),
     ("Type a command",      ":",     "Tab completes, e.g. temp 22. In read-only mode commands are checked but not sent."),
     ("Hotkeys",             "H",     "One-key commands, e.g. H honks (not sent in read-only mode)."),
-    ("Command log",         "z",     "Every command and its result is logged."),
+    ("Command log",         "z",     "Every command and its result is logged, with the mode it was sent in."),
+    ("Last data",           "!",     "The car's last data as JSON, as Tesla sent it."),
+    ("Costs",               "$",     "Billed requests (Fleet API, MyTeslaMate) and their cost, per billing period."),
     ("Chargers",            ":",     "Chargers in range, or in km (chargers 200); Enter sends one to the car."),
     ("Terminal map",        ":",     "mapscii chargers / country: the car and the Superchargers in range or in its country."),
     ("  Globe view",        ":",     "mapscii world: all Superchargers on a 3D globe; a/z zoom."),
@@ -33,7 +35,7 @@ keys: collections.deque = collections.deque(maxlen=20)
 
 def draw() -> None:
     cols, rows = os.get_terminal_size()
-    out = ["\x1b[H\x1b[2J", "", f"  {B}tuisla{R} {DIM}demo, read-only mode{R}", "", ""]
+    out = ["\x1b[H\x1b[2J", "", f"  {B}tuisla{R} {DIM}demo, read-only mode{R}", ""]
     for i, (title, key, _) in enumerate(STEPS):
         keytxt = f"{CYN}{key:>3}{R}" if key else "   "
         if i == current:
@@ -42,9 +44,10 @@ def draw() -> None:
             out.append(f" {DIM}   {title:<{cols - 12}}{R}{keytxt}")
         else:
             out.append(f"    {title:<{cols - 12}}{keytxt}")
-    out += ["", ""]
+    out.append("")
     if 0 <= current < len(STEPS):
-        for line in textwrap.wrap(STEPS[current][2], cols - 4):
+        room = rows - 3 - len(out)                 # above "Keys pressed"
+        for line in textwrap.wrap(STEPS[current][2], cols - 4)[:max(0, room)]:
             out.append(f"  {line}")
     sys.stdout.write("\r\n".join(out))
 

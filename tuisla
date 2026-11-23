@@ -1294,8 +1294,8 @@ def show_data_pager(term: "Term", c: "Colors", st: "State") -> None:
                     row = f"{c.CYN}{key}\"{c.R}: {rest}"
                 lines.append("  " + " " * (pad + (2 if i else 0)) + row)
 
-    at = _dt.datetime.fromtimestamp(st.data_at).strftime("%d %b %H:%M") if st.data_at else "?"
-    add(f"Vehicle data, {at}", st.last_data or {})
+    at = _dt.datetime.fromtimestamp(st.data_at).strftime(", %d %b %H:%M") if st.data_at else ""
+    add(f"Vehicle data{at}", st.last_data or {})
     def diff(new: Any, old: Any) -> Any:
         """What new has that old lacks or has otherwise (timestamps left out)."""
         if not (isinstance(new, dict) and isinstance(old, dict)):

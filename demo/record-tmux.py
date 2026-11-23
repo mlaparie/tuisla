@@ -44,17 +44,21 @@ SCRIPT = [
     (10, [(0.8, "H")], 3.0),
     (11, [(0.8, "z")], 3.5),
     (None, [(0, "q")], 0.5),
-    (12, [(0.8, ":")] + typed("chargers 200") + [(0.8, "Enter"), (2.5, "j"), (1.2, "Enter")], 4.5),
-    (13, [(0.8, ":")] + typed("mapscii chargers", 0.1) + [(0.8, "Enter")], 9.0),
+    (12, [(0.8, "!"), (2.0, "d"), (1.0, "d")], 2.0),
+    (None, [(0, "q")], 0.5),
+    (13, [(0.8, "$")], 3.0),
+    (None, [(0, "q")], 0.5),
+    (14, [(0.8, ":")] + typed("chargers 200") + [(0.8, "Enter"), (2.5, "j"), (1.2, "Enter")], 5.0),
+    (15, [(0.8, ":")] + typed("mapscii chargers", 0.1) + [(0.8, "Enter")], 9.0),
     (None, [(0, "q")], 1.0),
     (None, [(0.5, ":")] + typed("mapscii country", 0.1) + [(0.8, "Enter")], 7.0),
     (None, [(0, "q")], 1.0),
     # The world opens as a globe, then zooms in on Europe.
-    (14, [(0.8, ":")] + typed("mapscii world", 0.1) + [(0.8, "Enter")]
+    (16, [(0.8, ":")] + typed("mapscii world", 0.1) + [(0.8, "Enter")]
          + [(7.0, "a")] + [(0.6, "a")] * 6, 3.0),
     (None, [(0, "q"), (2.5, "q")], 1.0),
-    (15, [(0.8, "W"), (3.5, "W")], 3.0),
-    (16, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
+    (17, [(0.8, "W"), (3.5, "W")], 3.0),
+    (18, [(0.8, "m"), (2.2, "m"), (2.2, "m")], 2.5),
 ]   # the cast ends here, before anything quits, so a GIF of it loops cleanly
 
 
