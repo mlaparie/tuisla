@@ -98,6 +98,7 @@ DEMO_DATA = {
             "sentry_mode": True,
             "valet_mode": False,
             "df": 0, "pf": 0, "dr": 0, "pr": 0, "ft": 0, "rt": 0,
+            "fd_window": 0, "fp_window": 0, "rd_window": 0, "rp_window": 0,
             "software_update": {"version": "2026.2.6", "status": "available"},
             "tpms_pressure_fl": 3.00,
             "tpms_pressure_fr": 3.05,
@@ -115,6 +116,11 @@ DEMO_DATA = {
             "charge_actual_current": 32,
             "charge_energy_added": 4.2,
             "battery_heater_on": True,
+            "scheduled_charging_mode": "DepartBy",
+            "scheduled_departure_time": int(_dt.datetime.combine(_dt.date.today(), _dt.time(7, 30)).timestamp()),
+            "off_peak_charging_enabled": True,
+            "preconditioning_enabled": True,
+            "preconditioning_times": "weekdays",
         },
         "climate_state": {
             "inside_temp": 22.5,
@@ -123,6 +129,10 @@ DEMO_DATA = {
             "passenger_temp_setting": 21.0,
             "is_climate_on": True,
             "defrost_mode": 0,
+            "cabin_overheat_protection": "FanOnly",
+            "cop_activation_temperature": "High",
+            "cabin_overheat_protection_actively_cooling": False,
+            "is_preconditioning": False,
         },
         "drive_state": {"power": 2, "shift_state": None, "speed": None, "timestamp": 1771692668445,
                         "latitude": 48.1123, "longitude": -1.6694},
@@ -3151,9 +3161,12 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     st.last_data = data
     term_w, term_h = term.get_size()
     lbl_w, val_w = 9, 20
+    if term_w >= 2 * (2 + lbl_w + 22) + 2:
+        val_w = 22                      # room for "+4.1 kWh, end in 02:47"
     col_w    = 2 + lbl_w + val_w
     content_w = min((col_w * 2 + 2), term_w)
     frame = Frame(content_w=content_w, lbl_w=lbl_w)
+    fit = content_w // 2 - lbl_w - 3    # the longest value that keeps the right column in place
 
     dist_u  = "km"  if st.unit == "metric" else "mi"
     temp_u  = "°C"  if st.unit == "metric" else "°F"
@@ -3260,24 +3273,83 @@ def render_dashboard(term: Term, c: Colors, st: State, data: Dict[str, Any]) -> 
     frame.section(c, two_col_title(content_w, f"{px_bat}ENERGY", f"{px_clm}THERMAL"))
     frame.cat_labels = True
 
-    added = f"{c.GRN}+{chg_added:g} kWh{c.R}" if chg_state != "disconnected" else ""
-    frame.row2(c, "Battery", bat_bar,                        "Outside", f"{outside}{temp_u}")
-    frame.row2(c, "Range",   f"{rng} {dist_u}",              "Inside",  f"{inside}{temp_u}")
-    frame.row2(c, "Draw",    f"{dra_c}{draw} kW{c.R}",       "Target",  f"{set_temp}{temp_u}")
-    frame.row2(c, "Charge",  f"{cs_c}{chg_state}{c.R} {added}", "Control", f"{clm_c}{clm_l}{c.R}")
-    frame.row2(c, "Limit",   f"{chg_limit}%",                "Defrost", f"{def_c}{def_l}{c.R}")
-    if chg_state != "disconnected":
-        frame.row2(c, "Power",  f"{c.YLW}{chg_kw} kW ({chg_volts} V, {chg_current} A){c.R}",
-                      "Battery", "")
-        frame.row2(c, "End in", fmt_time_hhmm(chg_mins), " heater", f"{bat_c}{bat_l}{c.R}")
+    cs, cl = jget(data, "response.charge_state", {}) or {}, jget(data, "response.climate_state", {}) or {}
+    vs, plugged = jget(data, "response.vehicle_state", {}) or {}, chg_state != "disconnected"
+
+    def clock(epoch: Any) -> str:          # a schedule's time of day
+        try:
+            return _dt.datetime.fromtimestamp(float(epoch)).strftime("%H:%M")
+        except (TypeError, ValueError, OverflowError, OSError):
+            return "?"
+
+    def days(v: Any) -> str:
+        return {"weekdays": "Mon–Fri", "all_week": "daily"}.get(str(v), "")
+
+    # Charge: what was added, and when it ends while charging.
+    kwh = f"+{chg_added:.1f} kWh" if chg_added < 10 else f"+{chg_added:.0f} kWh"
+    if chg_state == "charging":
+        charge = f"{c.YLW}{kwh}, end in {fmt_time_hhmm(chg_mins)}{c.R}"
+        if vlen(charge) > fit:
+            charge = f"{c.YLW}{kwh}, end {fmt_time_hhmm(chg_mins)}{c.R}"
+    elif chg_state == "complete":
+        charge = f"{c.GRN}completed {kwh}{c.R}"
+    elif plugged:
+        charge = f"{c.R}{chg_state if chg_state == 'starting' else 'off'} {kwh}{c.R}"
+    else:
+        charge = f"{c.GRY}disconnected{c.R}"
+
+    # Sched: the charging schedule (start at, or ready by the departure).
+    mode = str(cs.get("scheduled_charging_mode") or "Off")
+    if mode == "StartAt":
+        sched = f"{c.R}at {clock(cs.get('scheduled_charging_start_time'))}{c.R}"
+    elif mode == "DepartBy":
+        sched = (f"{c.R}by {clock(cs.get('scheduled_departure_time'))}"
+                 + (" off-peak" if cs.get("off_peak_charging_enabled") else "") + c.R)
+    else:
+        sched = f"{c.GRY}off{c.R}"
+
+    # COP and Precond: off when turned off, else whether it runs now and its setting.
+    def setting(enabled: bool, running: bool, what: str) -> str:
+        if not enabled:
+            return f"{c.GRY}off{c.R}"
+        return f"{c.GRN}on ({what}){c.R}" if running else f"{c.R}off ({what}){c.R}"
+
+    cop_mode = str(cl.get("cabin_overheat_protection") or "Off")
+    cop_temp = str(cl.get("cop_activation_temperature") or "").lower()
+    cop = setting(cop_mode != "Off", bool(cl.get("cabin_overheat_protection_actively_cooling")),
+                  ("fan" if cop_mode == "FanOnly" else "A/C") + (f" {cop_temp}" if cop_temp else ""))
+    precond = setting(bool(cs.get("preconditioning_enabled")), bool(cl.get("is_preconditioning")),
+                      f"{clock(cs.get('scheduled_departure_time'))} {days(cs.get('preconditioning_times'))}".strip())
+
+    climate = f"{clm_c}{clm_l} {set_temp}{temp_u}{c.R}"
+    power = f"{c.YLW}{chg_kw} kW ({chg_volts} V, {chg_current} A){c.R}"
+
+    # Both columns always have as many rows; Power and B. heat only while plugged in.
+    left = [("Battery", bat_bar), ("Range", f"{rng} {dist_u}"), ("Draw", f"{dra_c}{draw} kW{c.R}"),
+            ("Charge", charge)] + ([("Power", power)] if plugged else []) + \
+           [("Limit", f"{chg_limit}%"), ("Sched", sched)]
+    right = [("Outside", f"{outside}{temp_u}"), ("Inside", f"{inside}{temp_u}"), ("Climate", climate)] + \
+            ([("B. heat", f"{bat_c}{bat_l}{c.R}")] if plugged else []) + \
+            [("Defrost", f"{def_c}{def_l}{c.R}"), ("COP", cop), ("Precond", precond)]
+    for (ll, vl), (lr, vr) in zip(left, right):
+        frame.row2(c, ll, vl, lr, vr)
+
+    # Windows, named like the tyres (the driver's side depends on the drive side).
+    rhd = bool(jget(data, "response.vehicle_config.rhd", False))
+    sides = {"fd_window": "F right" if rhd else "F left", "fp_window": "F left" if rhd else "F right",
+             "rd_window": "R right" if rhd else "R left", "rp_window": "R left" if rhd else "R right"}
+    opened = [n for k, n in sides.items() if int(vs.get(k) or 0)]
+    windows = (f"{c.GRN}closed{c.R}" if not opened else
+               f"{c.RED}{', '.join(sorted(opened))} open{c.R}" if len(opened) <= 2 else f"{c.RED}{len(opened)} open{c.R}")
+    status = f"{lk_c}{lk_l}{c.R}" + (f"{c.GRY}, valet{c.R}" if valet else "")
 
     frame.section(c, two_col_title(content_w, f"{px_drv}WHEELS", f"{px_sec}PARKING"))
     def tyre(v: float) -> str:
         return f"{v:.2f} {press_u}" if st.unit == "metric" else f"{int(v)} {press_u}"
-    frame.row2(c, "F left",  tyre(fl), "Status", f"{lk_c}{lk_l}{c.R}")
-    frame.row2(c, "F right", tyre(fr), "Panels", f"{dr_c}{dr_l}{c.R}")
-    frame.row2(c, "R left",  tyre(rl), "Sentry", f"{sn_c}{sn_l}{c.R}")
-    frame.row2(c, "R right", tyre(rr), "Valet",  f"{vl_c}{vl_l}{c.R}")
+    frame.row2(c, "F left",  tyre(fl), "Status",  status)
+    frame.row2(c, "F right", tyre(fr), "Panels",  f"{dr_c}{dr_l}{c.R}")
+    frame.row2(c, "R left",  tyre(rl), "Windows", windows)
+    frame.row2(c, "R right", tyre(rr), "Sentry",  f"{sn_c}{sn_l}{c.R}")
 
     # The route, when there is one and the window has room for it.
     ds = route_fields(st, data)
