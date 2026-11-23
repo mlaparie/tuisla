@@ -44,7 +44,7 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car,
 
 - `--mode mtm` (default, recommended): commands are sent to the car through the MyTeslaMate API.
 - `--mode ro` (read-only): commands are checked for validity, but not sent.
-- `--mode vc` (vehicle-command): commands are sent through Tesla's own [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy instead of MyTeslaMate, with your own Tesla developer account and a key paired with your car. This mode requires no paid API (a monthly credit from Tesla, $10 in the US or €10 in Europe, covers a personal car, commands costing $1 per 1,000, though its developer site asks for a payment card), but its setup is more involved: `./tuisla --setup-vc` (or `--login`) walks you through it. It can work over Bluetooth when the phone or the car has no network (*e.g.*, an underground car park).
+- `--mode vc` (vehicle-command): commands are sent through Tesla's own [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy instead of MyTeslaMate, with your own Tesla developer account and a key paired with your car. This mode requires no paid API (a monthly credit from Tesla, $10 in the US or €10 in Europe, covers a personal car, commands costing $1 per 1,000, though its developer site asks for a payment card), but its setup is more involved: `./tuisla --setup-vc` (or `--login`) walks you through it. On another device, it skips what is already done: run `./tuisla --export-vc` on the first one and paste its code into `--setup-vc`, which then only installs the tools and signs in. It can work over Bluetooth when the phone or the car has no network (*e.g.*, an underground car park).
 - `--login` and `--setup-vc` ask which mode `tuisla` starts in; change it with `--default-mode MODE`, or pick one for a run with `-m`.
 
 See `./tuisla --help` for more options, and [FILES.org](FILES.org) for the files `tuisla` keeps.
@@ -53,7 +53,7 @@ See `./tuisla --help` for more options, and [FILES.org](FILES.org) for the files
 usage: tuisla [-h] [-m {ro,mtm,vc}] [-u {metric,us}] [-r SECONDS] [-i] [-W]
               [-s] [-b] [-l] [--login-tesla] [--login-mtm] [--print]
               [--default-mode {ro,mtm,vc}] [--billing-day MODE DAY]
-              [--setup-vc]
+              [--setup-vc] [--export-vc]
 
 options:
   -h, --help            show this help message and exit
@@ -83,7 +83,9 @@ options:
                         mtm) starts, for the counts in z (e.g. --billing-day
                         vc 22), then exit
   --setup-vc            Step-by-step setup of vc mode (own key and Tesla
-                        developer app)
+                        developer app), or joining one made on another device
+  --export-vc           Print a code that lets --setup-vc on another device
+                        use this device's vc setup, then exit
 ```
 
 ## Commands

@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import base64
 import getpass
 import importlib.machinery
 import importlib.util
@@ -43,6 +44,7 @@ from tuisla import (AUTHORIZE_URL, FLEET_REGIONS, FLEET_TOKEN_FILE, FLEET_TOKEN_
 FLEET_SCOPES     = "openid offline_access vehicle_device_data vehicle_location vehicle_cmds vehicle_charging_cmds"
 PUBKEY_PATH      = "/.well-known/appspecific/com.tesla.3p.public-key.pem"
 CALLBACK_PAGE    = "tuisla-callback.html"
+EXPORT_PREFIX    = "tuisla-vc1:"     # --export-vc codes
 # go install …@latest refuses this module (its go.mod has replace directives),
 # so it is built from a clone.
 PROXY_REPO       = "https://github.com/teslamotors/vehicle-command.git"
@@ -128,7 +130,8 @@ def setup_vc() -> int:
     def get_secret() -> str:
         nonlocal secret
         while not secret:
-            secret = getpass.getpass("Client Secret (hidden, from the same page): ").strip()
+            secret = getpass.getpass("Client Secret (hidden; developer.tesla.com, your app's "
+                                     "\"Credentials & APIs\" page): ").strip()
         return secret
 
     shelled: List[str] = []      # tools run through guix shell or nix-shell
@@ -210,6 +213,20 @@ def setup_vc() -> int:
           "It takes about 20 minutes.  You can stop at any time (Ctrl-C) and run\n"
           "tuisla --setup-vc again later: finished steps are remembered.")
     try:
+        # Another device already set up: take its app and key, sign in anew.
+        if not cfg.get("client_id") and not os.path.exists(vc_file("private.pem")) and yes(
+                "\nIs vc mode already set up on another device, for this Tesla account?", default=False):
+            print("On that device, run  tuisla --export-vc  and paste its code here (or the\n"
+                  "path of a file holding it).  The steps already done there are skipped;\n"
+                  "this device only gets the tools and its own sign-in (step 6).")
+            while True:
+                try:
+                    cfg = import_vc(ask("Code"))
+                    break
+                except ValueError as e:
+                    print(f"X {e}")
+            print(f"✓ Imported: app {cfg['client_id'][:8]}…, {cfg.get('domain')}, {cfg.get('vin') or 'no car yet'}")
+
         # ── 1. Tools ───────────────────────────────────────────────────────
         step(1, "tools")
         missing = [t for t in GO_TOOLS if not find_go_tool(t)]
@@ -625,5 +642,52 @@ you to tap your key card on the console; do it.""")
         return 1
 
 
+# What another device needs to join this setup: the app, domain, region and
+# car (not this device's sign-in, which it makes itself), and the command key.
+_EXPORT_KEYS = ("client_id", "domain", "region", "fleet_api", "registered", "vin", "ble_key")
+
+
+def export_vc() -> int:
+    """Print the code that tuisla --setup-vc takes on another device."""
+    cfg, priv = load_vc_config(), vc_file("private.pem")
+    if not cfg.get("client_id") or not os.path.exists(priv):
+        print("X vc mode is not set up on this device (tuisla --setup-vc)", file=sys.stderr)
+        return 1
+    with open(priv) as f:
+        data = {**{k: cfg[k] for k in _EXPORT_KEYS if k in cfg}, "key": f.read()}
+    day = (load_usage().get("days") or {}).get("vc")
+    if day:
+        data["billing_day"] = day
+    print("Paste this into tuisla --setup-vc on the other device.  It holds the key\n"
+          "that controls your car: send it privately (scp, USB, KDE Connect...), not\n"
+          "by mail or chat, and delete it afterwards.\n", file=sys.stderr)
+    print(EXPORT_PREFIX + base64.b64encode(json.dumps(data).encode()).decode())
+    return 0
+
+
+def import_vc(code: str) -> Dict[str, Any]:
+    """Save what export_vc printed (the code, or a file holding it); return the config."""
+    code = code.strip()
+    if not code.startswith(EXPORT_PREFIX) and os.path.isfile(os.path.expanduser(code)):
+        with open(os.path.expanduser(code)) as f:
+            code = f.read().strip()
+    try:
+        data = json.loads(base64.b64decode(code.removeprefix(EXPORT_PREFIX), validate=True))
+        key = data.pop("key")
+        assert data.get("client_id") and "PRIVATE KEY" in key
+    except (ValueError, KeyError, AssertionError, AttributeError):
+        raise ValueError("not a tuisla --export-vc code; copy the whole line") from None
+    day = data.pop("billing_day", None)
+    os.makedirs(token_path("vc"), mode=0o700, exist_ok=True)
+    fd = os.open(vc_file("private.pem"), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(key)
+    cfg = {k: data[k] for k in _EXPORT_KEYS if k in data}
+    save_token(json.dumps(cfg, indent=2), VC_CONFIG)
+    if day:
+        set_billing_day("vc", int(day))
+    return cfg
+
+
 if __name__ == "__main__":
-    raise SystemExit(setup_vc())
+    raise SystemExit(export_vc() if sys.argv[1:] == ["--export"] else setup_vc())

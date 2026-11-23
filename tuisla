@@ -885,12 +885,12 @@ def login(print_token: bool = False, then_mtm: bool = True) -> int:
     return login_mtm() if choice == "1" else 0
 
 
-def setup_vc() -> None:
+def setup_vc(*opts: str) -> None:
     """Run the vc mode setup, which lives in its own script next to this one."""
     script = os.path.join(os.path.dirname(os.path.realpath(__file__)), "tuisla-setup-vc")
     if not os.path.exists(script):
         die(f"{script} is missing; get it from the tuisla repository, next to tuisla")
-    os.execv(sys.executable, [sys.executable, script])
+    os.execv(sys.executable, [sys.executable, script, *opts])
 
 
 SETTINGS_FILE = "settings.json"      # choices made at setup (the default mode)
@@ -3568,7 +3568,11 @@ def main() -> int:
                     help="Day of the month the billing period of MODE (vc or mtm) starts, for "
                          "the counts in z (e.g. --billing-day vc 22), then exit")
     ap.add_argument("--setup-vc",      action="store_true",
-                    help="Step-by-step setup of vc mode (own key and Tesla developer app)")
+                    help="Step-by-step setup of vc mode (own key and Tesla developer app), "
+                         "or joining one made on another device")
+    ap.add_argument("--export-vc",     action="store_true",
+                    help="Print a code that lets --setup-vc on another device use this "
+                         "device's vc setup, then exit")
     args = ap.parse_args()
 
     if args.login or args.login_tesla:
@@ -3590,6 +3594,8 @@ def main() -> int:
         return 0
     if args.setup_vc:
         setup_vc()
+    if args.export_vc:
+        setup_vc("--export")
 
     saved_mode = load_settings().get("mode")
     st = State(
