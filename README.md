@@ -44,9 +44,47 @@ You can skip the MyTeslaMate step if you don't want to send commands to the car,
 
 - `--mode mtm` (default, recommended): commands are sent to the car through the MyTeslaMate API.
 - `--mode ro` (read-only): commands are checked for validity, but not sent.
-- `--mode vc` (vehicle-command): commands are sent through Tesla's own [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy instead of MyTeslaMate, with your own Tesla developer account and a key paired with your car. This mode requires no paid API (a monthly credit from Tesla, $10 in the US or €10 in Europe, covers a personal car, commands costing $1 per 1,000, though its developer site asks for a payment card), but its setup is more involved: `./tuisla --setup-vc` (or `--login`) walks you through it. It needs `openssl` and Go; on Guix and Nix, it runs them in a temporary `guix shell` / `nix-shell` instead of installing them, and elsewhere it offers to install them and remove them again at the end. It can work over Bluetooth when the phone or the car has no network (*e.g.*, an underground car park), once the key is also added over Bluetooth, which the setup's last, optional step does next to the car. `--login` and `--setup-vc` ask which mode `tuisla` starts in; change it with `--default-mode MODE`, or pick one for a run with `-m`.
+- `--mode vc` (vehicle-command): commands are sent through Tesla's own [vehicle-command](https://github.com/teslamotors/vehicle-command) proxy instead of MyTeslaMate, with your own Tesla developer account and a key paired with your car. This mode requires no paid API (a monthly credit from Tesla, $10 in the US or €10 in Europe, covers a personal car, commands costing $1 per 1,000, though its developer site asks for a payment card), but its setup is more involved: `./tuisla --setup-vc` (or `--login`) walks you through it. It can work over Bluetooth when the phone or the car has no network (*e.g.*, an underground car park).
+- `--login` and `--setup-vc` ask which mode `tuisla` starts in; change it with `--default-mode MODE`, or pick one for a run with `-m`.
 
 See `./tuisla --help` for more options, and [FILES.org](FILES.org) for the files `tuisla` keeps.
+
+```
+usage: tuisla [-h] [-m {ro,mtm,vc}] [-u {metric,us}] [-r SECONDS] [-i] [-W]
+              [-s] [-b] [-l] [--login-tesla] [--login-mtm] [--print]
+              [--default-mode {ro,mtm,vc}] [--billing-day MODE DAY]
+              [--setup-vc]
+
+options:
+  -h, --help            show this help message and exit
+  -m {ro,mtm,vc}, --mode {ro,mtm,vc}
+                        Where commands go (default: the one chosen at setup,
+                        else mtm, or vc when only vc is set up)
+  -u {metric,us}, --unit {metric,us}
+  -r SECONDS, --refresh SECONDS
+                        Refresh interval in s (default: 5)
+  -i, --invert
+  -W, --keep-awake      Keep the car awake instead of letting it sleep when
+                        idle
+  -s, --simple          Disable fancy style
+  -b, --bw              Disable colors
+  -l, --login           Sign in to Tesla, then set up MyTeslaMate or vc mode
+                        for commands
+  --login-tesla         Sign in to Tesla and save a refresh token, then exit
+  --login-mtm           Save a MyTeslaMate API token (from their API tab),
+                        then exit
+  --print               With --login-tesla: print the Tesla token instead of
+                        saving it
+  --default-mode {ro,mtm,vc}
+                        Mode tuisla starts in without -m (asked at --login and
+                        --setup-vc), then exit
+  --billing-day MODE DAY
+                        Day of the month the billing period of MODE (vc or
+                        mtm) starts, for the counts in z (e.g. --billing-day
+                        vc 22), then exit
+  --setup-vc            Step-by-step setup of vc mode (own key and Tesla
+                        developer app)
+```
 
 ## Commands
 
