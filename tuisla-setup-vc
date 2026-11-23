@@ -130,8 +130,23 @@ def setup_vc() -> int:
     def get_secret() -> str:
         nonlocal secret
         while not secret:
-            secret = getpass.getpass("Client Secret (hidden; developer.tesla.com, your app's "
-                                     "\"Credentials & APIs\" page): ").strip()
+            secret = getpass.getpass(f"Client Secret of {cfg['client_id'][:8]}… (hidden; developer.tesla.com, "
+                                     "your app's \"Credentials & APIs\" page): ").strip()
+            if not secret:
+                print("X Nothing read; paste it (Ctrl+Shift+V in most terminals) and press Enter.")
+                continue
+            # Checked here, before the sign-in, whose code a bad secret would waste.
+            try:
+                auth_post(FLEET_TOKEN_URL, {
+                    "grant_type": "client_credentials", "client_id": cfg["client_id"],
+                    "client_secret": secret, "audience": cfg.get("fleet_api") or FLEET_REGIONS["na"],
+                    "scope": "openid vehicle_device_data"})
+            except RuntimeError as e:
+                if str(e).startswith(("HTTP 400", "HTTP 401")):
+                    print(f"X Tesla refuses this secret ({len(secret)} characters read) for Client ID\n"
+                          f"  {cfg['client_id']}: {api_error(e)}\n"
+                          "  Copy the secret again, of this very app (its Client ID is on the same page).")
+                    secret = ""
         return secret
 
     shelled: List[str] = []      # tools run through guix shell or nix-shell
