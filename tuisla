@@ -2721,7 +2721,7 @@ def render_help(term: Term, c: Colors, st: State) -> None:
     frame.row2(c, kcap("-", "refresh -5s"),   "", kcap("b", "bw/color"),  "")
     frame.row2(c, kcap("+", "refresh +5s"),   "", kcap("i", "invert"),    "")
     frame.row2(c, kcap("!", "last data"),     "", kcap("$", "costs"),     "")
-    frame.row1(c, kcap("q", "quit"),          "")
+    frame.row2(c, "",                         "", kcap("q", "quit"),      "")
 
     cmd_frame = Frame(content_w=content_w, lbl_w=lbl_w)
     cmd_frame.section(c, "COMMANDS")
